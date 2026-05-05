@@ -500,9 +500,15 @@ class NovelDownloaderApp:
 
         res = index_session.get(index_url, headers=doc_headers)
 
-        if res.status_code != 200 or "cf-browser-verification" in res.text or "Just a moment" in res.text:
+        cf_keywords = ["cf-browser-verification", "Just a moment", "Ray ID"]
+        if res.status_code == 404:
+            self.log(f"[-] ERROR: Novel not found (HTTP 404).")
+            return 0
+        elif res.status_code in (403, 503) or any(k in res.text for k in cf_keywords):
             self.log(f"[-] ERROR: Cloudflare Blocked the index request. (HTTP {res.status_code})")
-            print(res.text)
+            return 0
+        elif res.status_code != 200:
+            self.log(f"[-] ERROR: Unexpected HTTP error fetching index. (HTTP {res.status_code})")
             return 0
 
         # Extract precise title using OpenGraph or <title>
