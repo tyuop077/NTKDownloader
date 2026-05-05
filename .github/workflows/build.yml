@@ -15,11 +15,25 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Build Executable via PyInstaller
-        uses: Martin005/pyinstaller-action@v1.2.0
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
-          python_ver: '3.11'
-          spec: 'app.py'
-          requirements: 'requirements.txt'
-          upload_exe_with_name: 'NTK_Downloader_Windows'
-          options: --onefile, --windowed, --name "NTK_Downloader", --collect-all curl_cffi
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+          pip install -r requirements.txt
+
+      - name: Build Executable via PyInstaller
+        run: |
+          pyinstaller --onefile --windowed --name "NTK_Downloader" --collect-all curl_cffi app.py
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: NTK_Downloader_Windows
+          path: dist/NTK_Downloader.exe
+          if-no-files-found: error
