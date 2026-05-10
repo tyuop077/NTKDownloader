@@ -11,8 +11,10 @@ import shlex
 import webbrowser
 import platform
 import tkinter as tk
+import gzip
 from tkinter import ttk, scrolledtext, messagebox
 from pathlib import Path
+from urllib.parse import urlparse
 from curl_cffi import requests
 from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor
@@ -206,15 +208,18 @@ class NovelDownloaderApp:
 
         self.is_downloading = False
         self.cancel_requested = False
+        self.current_domain = None
+
         self.setup_ui()
         self.load_session()
 
         self.log(f"[*] Initialized. EPUBs will be saved to:\n    {BASE_DIR}")
         self.log("[*] Instructions:")
-        self.log("    1. Click 'Open ntk01.com/-'")
-        self.log("    2. Open DevTools (F12) -> Network tab -> Refresh the page.")
-        self.log("    3. Right-click the '-' request -> Copy -> Copy as cURL (bash).")
-        self.log("    4. Paste the entire command into the cURL box below.\n")
+        self.log("    1. Paste novel URLs in the first box.")
+        self.log("    2. Click 'Open [domain]/-' to open the browser page.")
+        self.log("    3. Open DevTools (F12) -> Network tab -> Refresh the page.")
+        self.log("    4. Right-click the '-' request -> Copy -> Copy as cURL (bash).")
+        self.log("    5. Paste the entire command into the cURL box and start.\n")
 
     def setup_ui(self):
         style = ttk.Style()
@@ -239,27 +244,25 @@ class NovelDownloaderApp:
         input_frame.pack(fill=tk.BOTH, expand=True)
 
         input_frame.columnconfigure(1, weight=1)
+        input_frame.rowconfigure(0, weight=1)
         input_frame.rowconfigure(1, weight=1)
-        input_frame.rowconfigure(2, weight=1)
 
-        self.open_btn = ttk.Button(input_frame, text="🌐 Open ntk01.com/-", command=self.open_helper)
-        self.open_btn.grid(row=0, column=0, columnspan=2, sticky=tk.W, pady=(0, 10))
-
-        ttk.Label(input_frame, text="Paste cURL here:").grid(row=1, column=0, sticky=tk.NW, pady=2)
-        self.curl_text = scrolledtext.ScrolledText(input_frame, height=4, width=70)
-        self.curl_text.grid(row=1, column=1, sticky=tk.NSEW, pady=2, padx=5)
-
-        ttk.Label(input_frame, text="Novel URLs:").grid(row=2, column=0, sticky=tk.NW, pady=10)
+        ttk.Label(input_frame, text="Novel URLs:").grid(row=0, column=0, sticky=tk.NW, pady=2)
         self.urls_text = scrolledtext.ScrolledText(input_frame, height=4, width=70)
-        self.urls_text.grid(row=2, column=1, sticky=tk.NSEW, pady=10, padx=5)
+        self.urls_text.grid(row=0, column=1, sticky=tk.NSEW, pady=2, padx=5)
+
+        ttk.Label(input_frame, text="Paste cURL here:").grid(row=1, column=0, sticky=tk.NW, pady=10)
+        self.curl_text = scrolledtext.ScrolledText(input_frame, height=4, width=70)
+        self.curl_text.grid(row=1, column=1, sticky=tk.NSEW, pady=10, padx=5)
 
         self.curl_text.bind("<Control-a>", self.select_all)
         self.curl_text.bind("<Command-a>", self.select_all)
         self.urls_text.bind("<Control-a>", self.select_all)
         self.urls_text.bind("<Command-a>", self.select_all)
+        self.urls_text.bind("<KeyRelease>", self.update_domain_btn)
 
         options_frame = ttk.Frame(input_frame)
-        options_frame.grid(row=3, column=0, columnspan=2, sticky=tk.EW, pady=(5, 0))
+        options_frame.grid(row=2, column=0, columnspan=2, sticky=tk.EW, pady=(5, 0))
 
         ttk.Label(options_frame, text="Parallel Requests:").pack(side=tk.LEFT)
         self.workers_var = tk.IntVar(value=1)
@@ -268,6 +271,9 @@ class NovelDownloaderApp:
 
         btn_frame = ttk.Frame(options_frame)
         btn_frame.pack(side=tk.RIGHT)
+
+        self.open_btn = ttk.Button(btn_frame, text="Open None/-", command=self.open_helper, state=tk.DISABLED)
+        self.open_btn.pack(side=tk.LEFT, padx=5)
 
         self.clear_btn = ttk.Button(btn_frame, text="Clear Console", command=self.clear_console)
         self.clear_btn.pack(side=tk.LEFT, padx=5)
@@ -302,13 +308,33 @@ class NovelDownloaderApp:
         event.widget.see(tk.INSERT)
         return 'break'
 
+    def update_domain_btn(self, event=None):
+        urls = self.urls_text.get("1.0", tk.END).strip().split('\n')
+        for url in urls:
+            url = url.strip()
+            if not url or url.isdigit(): continue
+            if not url.startswith('http'):
+                url_to_parse = 'https://' + url
+            else:
+                url_to_parse = url
+
+            host = urlparse(url_to_parse).netloc
+            if host and '.' in host:
+                self.current_domain = host
+                self.open_btn.config(state=tk.NORMAL, text=f"Open {host}/-")
+                return
+
+        self.current_domain = "sbxh1.com"
+        self.open_btn.config(state=tk.DISABLED, text="Open sbxh1.com/-")
+
     def clear_console(self):
         self.console.config(state='normal')
         self.console.delete("1.0", tk.END)
         self.console.config(state='disabled')
 
     def open_helper(self):
-        webbrowser.open("https://ntk01.com/-")
+        if self.current_domain:
+            webbrowser.open(f"https://{self.current_domain}/-")
 
     def save_session(self, curl_cmd, raw_urls):
         try:
@@ -326,6 +352,7 @@ class NovelDownloaderApp:
                     if data.get("urls"): self.urls_text.insert(tk.END, data["urls"])
                     if data.get("workers"): self.workers_var.set(data["workers"])
                 self.log("[*] Previous session loaded successfully.")
+                self.update_domain_btn()
             except Exception:
                 pass
 
@@ -386,6 +413,9 @@ class NovelDownloaderApp:
             messagebox.showerror("Error", "Please enter at least one novel URL.")
             return
 
+        self.update_domain_btn()
+        domain = self.current_domain or "sbxh1.com"
+
         headers, cookies = parse_curl_command(curl_cmd)
         if not headers or not cookies:
             messagebox.showerror("Error", "Failed to parse headers/cookies from the cURL command.")
@@ -414,18 +444,18 @@ class NovelDownloaderApp:
         self.cancel_requested = False
         self.download_btn.config(text="Cancel", state=tk.NORMAL)
 
-        threading.Thread(target=self.download_worker, args=(novel_ids, headers, cookies), daemon=True).start()
+        threading.Thread(target=self.download_worker, args=(novel_ids, headers, cookies, domain), daemon=True).start()
 
-    def download_worker(self, novel_ids, headers, cookies):
+    def download_worker(self, novel_ids, headers, cookies, domain):
         total_new_chapters = 0
         try:
-            self.log("\n[*] Parsed Headers and Cookies successfully.")
+            self.log(f"\n[*] Parsed Headers and Cookies successfully. Target Domain: {domain}")
             for i, novel_id in enumerate(novel_ids):
                 if self.cancel_requested:
                     break
                 self.log(f"\n==========================================")
                 self.log(f"[*] Processing Novel ID: {novel_id} ({i+1}/{len(novel_ids)})")
-                scraped_count = self.process_novel(novel_id, headers, cookies)
+                scraped_count = self.process_novel(novel_id, headers, cookies, domain)
                 total_new_chapters += scraped_count
 
             if not self.cancel_requested:
@@ -448,7 +478,7 @@ class NovelDownloaderApp:
         messagebox.showinfo("Status", f"{msg}\n\nTotal new chapters scraped: {total_new}")
         self.cancel_requested = False
 
-    def process_novel(self, novel_id, parsed_headers, parsed_cookies):
+    def process_novel(self, novel_id, parsed_headers, parsed_cookies, domain):
         def get_header(key):
             for k, v in parsed_headers.items():
                 if k.lower() == key.lower():
@@ -490,12 +520,12 @@ class NovelDownloaderApp:
             s = requests.Session(impersonate="chrome120")
             for k, v in parsed_cookies.items():
                 if k.lower() != "nv":
-                    s.cookies.set(k, v, domain="ntk01.com")
+                    s.cookies.set(k, v, domain=domain)
             return s
 
         # Fetch Index Page
         index_session = create_clean_session()
-        index_url = f"https://ntk01.com/novel/{novel_id}"
+        index_url = f"https://{domain}/novel/{novel_id}"
         self.log(f"[*] Fetching index page...")
 
         res = index_session.get(index_url, headers=doc_headers)
@@ -534,11 +564,36 @@ class NovelDownloaderApp:
         total_chaps = len(ep_blocks)
         self.log(f"[+] Found {total_chaps} chapters.")
 
-        cache_file = CACHE_DIR / f"{novel_id}.json"
+        cache_file = CACHE_DIR / f"{novel_id}.jsonl.gz"
+        legacy_cache_file = CACHE_DIR / f"{novel_id}.json"
         cached_data = {}
+
         if cache_file.exists():
-            with open(cache_file, 'r', encoding='utf-8') as f:
-                cached_data = json.load(f)
+            try:
+                with gzip.open(cache_file, 'rt', encoding='utf-8') as f:
+                    lines = f.read().splitlines()
+                    if len(lines) > 1:
+                        for line in lines[1:]:
+                            if line.strip():
+                                ch_data = json.loads(line)
+                                if "ep_id" in ch_data:
+                                    cached_data[ch_data["ep_id"]] = ch_data
+            except Exception as e:
+                self.log(f"[-] Error reading .jsonl.gz cache: {e}")
+        elif legacy_cache_file.exists():
+            try:
+                with open(legacy_cache_file, 'r', encoding='utf-8') as f:
+                    old_data = json.load(f)
+                for k, v in old_data.items():
+                    if v.get('text') == '<p>Missing</p>':
+                        continue
+                    if v.get('type') == 'plain':
+                        del v['type']
+                    v['ep_id'] = k
+                    cached_data[k] = v
+                legacy_cache_file.unlink(missing_ok=True)
+            except Exception as e:
+                self.log(f"[-] Error converting legacy cache: {e}")
 
         # Concurrency Tools
         cache_lock = threading.Lock()
@@ -547,39 +602,58 @@ class NovelDownloaderApp:
 
         completed_chapters = [0]
         new_downloads = [0]
+        missing_eps = []
 
         try:
             max_workers = max(1, min(5, int(self.workers_var.get())))
         except:
             max_workers = 1
 
+        def save_cache():
+            try:
+                with gzip.open(cache_file, 'wt', encoding='utf-8') as f:
+                    f.write(json.dumps({"title": raw_title, "version": 2}, ensure_ascii=False) + "\n")
+                    for ep_num, href, title in ep_blocks:
+                        eid = href.split('/')[-1]
+                        if eid in cached_data:
+                            ch = cached_data[eid].copy()
+                            ch['ep_id'] = eid
+                            if ch.get('type') == 'plain':
+                                del ch['type']
+                            f.write(json.dumps(ch, ensure_ascii=False) + "\n")
+            except Exception as e:
+                self.log(f"[-] Cache write error: {e}")
+
         def get_thread_session():
             if not hasattr(thread_local, "session"):
                 s = create_clean_session()
                 issue_headers = api_headers.copy()
                 issue_headers["Referer"] = index_url
-                s.post("https://ntk01.com/api/nv-issue", headers=issue_headers)
+                s.post(f"https://{domain}/api/nv-issue", headers=issue_headers)
                 thread_local.session = s
             return thread_local.session
 
-        def process_chapter(ep_tuple):
+        def process_chapter(ep_tuple, is_retry=False):
             if self.cancel_requested:
                 return False
 
-            # Fixed tuple unpacking here!
             idx, ep_num, ep_href, ep_title = ep_tuple
             ep_id = ep_href.split('/')[-1]
-            chapter_url = f"https://ntk01.com{ep_href}"
+            chapter_url = f"https://{domain}{ep_href}"
 
             with cache_lock:
                 if ep_id in cached_data:
-                    with progress_lock:
-                        completed_chapters[0] += 1
-                        self.set_progress(completed_chapters[0], total_chaps, f"Skipping: {ep_title}")
+                    if not is_retry:
+                        with progress_lock:
+                            completed_chapters[0] += 1
+                            self.set_progress(completed_chapters[0], total_chaps, f"Skipping: {ep_title}")
                     return True
 
-            with progress_lock:
-                self.set_progress(completed_chapters[0], total_chaps, f"Downloading: {ep_title}")
+            if not is_retry:
+                with progress_lock:
+                    self.set_progress(completed_chapters[0], total_chaps, f"Downloading: {ep_title}")
+            else:
+                self.log(f"[*] Retrying missing chapter: {ep_title}")
 
             session = get_thread_session()
             success = False
@@ -608,19 +682,20 @@ class NovelDownloaderApp:
                             if np_html:
                                 with cache_lock:
                                     cached_data[ep_id] = {"title": ep_title, "text": np_html, "type": "html"}
-                                    with open(cache_file, 'w', encoding='utf-8') as f:
-                                        json.dump(cached_data, f, ensure_ascii=False)
+                                    save_cache()
                                 self.log(f"[+] Downloaded (Fallback): {ep_title}")
                                 success = True
-                                with progress_lock:
-                                    new_downloads[0] += 1
+                                if not is_retry:
+                                    with progress_lock:
+                                        new_downloads[0] += 1
                                 break
 
-                        self.log(f"[-] 'Not ready' text found. Saved as Missing: {ep_title}")
-                        with cache_lock:
-                            cached_data[ep_id] = {"title": ep_title, "text": "<p>Missing</p>", "type": "html"}
-                            with open(cache_file, 'w', encoding='utf-8') as f:
-                                json.dump(cached_data, f, ensure_ascii=False)
+                        if not is_retry:
+                            with cache_lock:
+                                missing_eps.append(ep_tuple)
+                            self.log(f"[-] 'Not ready'. Queued for retry: {ep_title}")
+                        else:
+                            self.log(f"[-] Still 'Not ready' on retry: {ep_title}")
                         success = True
                         break
 
@@ -647,7 +722,7 @@ class NovelDownloaderApp:
                     post_headers = api_headers.copy()
                     post_headers["Referer"] = chapter_url
 
-                    content_res = session.post("https://ntk01.com/api/novel-content", json=payload_data, headers=post_headers)
+                    content_res = session.post(f"https://{domain}/api/novel-content", json=payload_data, headers=post_headers)
 
                     try:
                         resp_json = content_res.json()
@@ -658,7 +733,7 @@ class NovelDownloaderApp:
                         if resp_json.get("error") == "expired":
                             issue_headers = api_headers.copy()
                             issue_headers["Referer"] = chapter_url
-                            session.post("https://ntk01.com/api/nv-issue", headers=issue_headers)
+                            session.post(f"https://{domain}/api/nv-issue", headers=issue_headers)
                         elif resp_json.get("error") == "blocked":
                             self.cancel_requested = True
                             self.log("[-] True block detected. Halting queue.")
@@ -676,14 +751,14 @@ class NovelDownloaderApp:
                     plaintext = decrypted_bytes.decode('utf-8')
 
                     with cache_lock:
-                        cached_data[ep_id] = {"title": ep_title, "text": plaintext, "type": "plain"}
-                        with open(cache_file, 'w', encoding='utf-8') as f:
-                            json.dump(cached_data, f, ensure_ascii=False)
+                        cached_data[ep_id] = {"title": ep_title, "text": plaintext}
+                        save_cache()
 
                     success = True
                     self.log(f"[+] Downloaded: {ep_title}")
-                    with progress_lock:
-                        new_downloads[0] += 1
+                    if not is_retry:
+                        with progress_lock:
+                            new_downloads[0] += 1
                     break
 
                 except Exception as e:
@@ -693,7 +768,7 @@ class NovelDownloaderApp:
                 self.log(f"[!] FATAL: Failed to download '{ep_title}' after retries. Halting novel.")
                 self.cancel_requested = True
 
-            if success:
+            if success and not is_retry:
                 with progress_lock:
                     completed_chapters[0] += 1
                     self.set_progress(completed_chapters[0], total_chaps)
@@ -701,16 +776,24 @@ class NovelDownloaderApp:
             return success
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            # Fixed the tuple packing here!
-            futures = [executor.submit(process_chapter, (idx, ep_num, ep_href, ep_title)) for idx, (ep_num, ep_href, ep_title) in enumerate(ep_blocks)]
+            futures = [executor.submit(process_chapter, (idx, ep_num, ep_href, ep_title), False) for idx, (ep_num, ep_href, ep_title) in enumerate(ep_blocks)]
             for future in futures:
                 future.result()
 
+        if missing_eps and not self.cancel_requested:
+            self.log(f"\n[*] Retrying {len(missing_eps)} missing chapters...")
+            for ep_tuple in missing_eps:
+                if self.cancel_requested:
+                    break
+                process_chapter(ep_tuple, is_retry=True)
+
         ordered_chapters = []
-        for _, ep_href, _ in ep_blocks:
+        for ep_num, ep_href, ep_title in ep_blocks:
             eid = ep_href.split('/')[-1]
             if eid in cached_data:
                 ordered_chapters.append(cached_data[eid])
+            else:
+                ordered_chapters.append({"title": ep_title, "text": "<p>Missing</p>", "type": "html", "missing": True})
 
         if ordered_chapters:
             if self.cancel_requested:
