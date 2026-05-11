@@ -326,8 +326,8 @@ class NovelDownloaderApp:
                 self.open_btn.config(state=tk.NORMAL, text=f"Open {host}/-")
                 return
 
-        self.current_domain = "sbxh1.com"
-        self.open_btn.config(state=tk.DISABLED, text="Open sbxh1.com/-")
+        self.current_domain = "ntk01.com"
+        self.open_btn.config(state=tk.DISABLED, text="Open ntk01.com/-")
 
     def clear_console(self):
         self.console.config(state='normal')
@@ -569,17 +569,25 @@ class NovelDownloaderApp:
         cache_file = CACHE_DIR / f"{novel_id}.jsonl.gz"
         legacy_cache_file = CACHE_DIR / f"{novel_id}.json"
         cached_data = {}
+        cache_version = 1
 
         if cache_file.exists():
             try:
                 with gzip.open(cache_file, 'rt', encoding='utf-8') as f:
                     lines = f.read().splitlines()
-                    if len(lines) > 1:
-                        for line in lines[1:]:
-                            if line.strip():
-                                ch_data = json.loads(line)
-                                if "ep_id" in ch_data:
-                                    cached_data[ch_data["ep_id"]] = ch_data
+                    if lines:
+                        try:
+                            header = json.loads(lines[0])
+                            cache_version = header.get("version", 1)
+                        except:
+                            pass
+
+                        if len(lines) > 1:
+                            for line in lines[1:]:
+                                if line.strip():
+                                    ch_data = json.loads(line)
+                                    if "ep_id" in ch_data:
+                                        cached_data[ch_data["ep_id"]] = ch_data
             except Exception as e:
                 self.log(f"[-] Error reading .jsonl.gz cache: {e}")
         elif legacy_cache_file.exists():
@@ -594,8 +602,55 @@ class NovelDownloaderApp:
                     v['ep_id'] = k
                     cached_data[k] = v
                 legacy_cache_file.unlink(missing_ok=True)
+                cache_version = 0
             except Exception as e:
                 self.log(f"[-] Error converting legacy cache: {e}")
+
+        def save_cache():
+            try:
+                with gzip.open(cache_file, 'wt', encoding='utf-8') as f:
+                    f.write(json.dumps({"title": raw_title, "version": 3}, ensure_ascii=False) + "\n")
+                    for ep_num, href, title in ep_blocks:
+                        eid = href.split('/')[-1]
+                        if eid in cached_data:
+                            ch = cached_data[eid].copy()
+                            ch['ep_id'] = eid
+                            if ch.get('type') == 'plain':
+                                del ch['type']
+                            f.write(json.dumps(ch, ensure_ascii=False) + "\n")
+            except Exception as e:
+                self.log(f"[-] Cache write error: {e}")
+
+        # Automigration for v1/v2 caches containing raw JSON strings
+        needs_rewrite = False
+        if cache_version < 3:
+            for eid, ch in list(cached_data.items()):
+                text_content = ch.get("text", "").strip()
+                if text_content.startswith('{'):
+                    try:
+                        parsed = json.loads(text_content)
+                        if isinstance(parsed, dict):
+                            if parsed.get("kind") == "html" and "html" in parsed:
+                                ch["text"] = parsed["html"]
+                                ch["type"] = "html"
+                            elif parsed.get("kind") == "text" and "text" in parsed:
+                                ch["text"] = parsed["text"]
+                                ch.pop("type", None)
+                            elif "text" in parsed:
+                                ch["text"] = parsed["text"]
+                                ch.pop("type", None)
+
+                            cached_data[eid] = ch
+                            needs_rewrite = True
+                    except:
+                        pass
+
+            if cache_version < 3:
+                needs_rewrite = True
+
+        if needs_rewrite:
+            self.log(f"[*] Upgrading cache format to v3...")
+            save_cache()
 
         # Concurrency Tools
         cache_lock = threading.Lock()
@@ -610,21 +665,6 @@ class NovelDownloaderApp:
             max_workers = max(1, min(5, int(self.workers_var.get())))
         except:
             max_workers = 1
-
-        def save_cache():
-            try:
-                with gzip.open(cache_file, 'wt', encoding='utf-8') as f:
-                    f.write(json.dumps({"title": raw_title, "version": 2}, ensure_ascii=False) + "\n")
-                    for ep_num, href, title in ep_blocks:
-                        eid = href.split('/')[-1]
-                        if eid in cached_data:
-                            ch = cached_data[eid].copy()
-                            ch['ep_id'] = eid
-                            if ch.get('type') == 'plain':
-                                del ch['type']
-                            f.write(json.dumps(ch, ensure_ascii=False) + "\n")
-            except Exception as e:
-                self.log(f"[-] Cache write error: {e}")
 
         def get_thread_session():
             if not hasattr(thread_local, "session"):
@@ -762,7 +802,7 @@ class NovelDownloaderApp:
                                     ch_type = "html"
                                 elif parsed_data.get("kind") == "text" and "text" in parsed_data:
                                     plaintext = parsed_data["text"]
-                                elif "text" in parsed_data:  # Fallback for unexpected formats
+                                elif "text" in parsed_data:
                                     plaintext = parsed_data["text"]
                         except ValueError:
                             pass
