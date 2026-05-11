@@ -169,7 +169,9 @@ def build_epub(novel_id, file_title, meta_title, chapters):
             if ch.get('type') == 'html':
                 html_content += sanitize_html_for_epub(ch['text'])
             else:
-                for p in ch['text'].split('\n\n'):
+                normalized_text = ch['text'].replace('\r\n', '\n')
+                normalized_text = re.sub(r'\n{2,}', '\n', normalized_text)
+                for p in normalized_text.split('\n'):
                     if p.strip():
                         html_content += f"<p>{p.strip()}</p>"
 
@@ -749,9 +751,27 @@ class NovelDownloaderApp:
                         decrypted_bytes[j] = encrypted_bytes[j] ^ xor_key_bytes[j % len(xor_key_bytes)]
 
                     plaintext = decrypted_bytes.decode('utf-8')
+                    ch_type = None
+
+                    if plaintext.startswith('{'):
+                        try:
+                            parsed_data = json.loads(plaintext)
+                            if isinstance(parsed_data, dict):
+                                if parsed_data.get("kind") == "html" and "html" in parsed_data:
+                                    plaintext = parsed_data["html"]
+                                    ch_type = "html"
+                                elif parsed_data.get("kind") == "text" and "text" in parsed_data:
+                                    plaintext = parsed_data["text"]
+                                elif "text" in parsed_data:  # Fallback for unexpected formats
+                                    plaintext = parsed_data["text"]
+                        except ValueError:
+                            pass
 
                     with cache_lock:
-                        cached_data[ep_id] = {"title": ep_title, "text": plaintext}
+                        cache_entry = {"title": ep_title, "text": plaintext}
+                        if ch_type == "html":
+                            cache_entry["type"] = "html"
+                        cached_data[ep_id] = cache_entry
                         save_cache()
 
                     success = True
