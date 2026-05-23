@@ -774,14 +774,51 @@ class NovelDownloaderApp:
 
                     if not resp_json.get("ok"):
                         self.log(f"[-] Failed response for {novel_id}/{ep_id} content: {resp_json}")
-                        if resp_json.get("error") == "expired":
+                        err_msg = resp_json.get("error")
+                        if err_msg == "expired":
                             issue_headers = api_headers.copy()
                             issue_headers["Referer"] = chapter_url
                             session.post(f"https://{domain}/api/nv-issue", headers=issue_headers)
-                        elif resp_json.get("error") == "blocked":
+
+                        elif err_msg == "ad_ack_required":
+                            self.log(f"[*] Ad verification required for {ep_title}. Sending Ack...")
+
+                            # 1. Fetch the Challenge Token
+                            chal_res = session.post(
+                                f"https://{domain}/api/ad/challenge",
+                                json={"path": ep_href},
+                                headers=post_headers
+                            )
+                            chal_data = chal_res.json() if chal_res.status_code == 200 else {}
+
+                            if chal_data and "challenge" in chal_data:
+                                chal_token = chal_data["challenge"]["token"]
+
+                                # 2. Submit the Ad Ack
+                                # The JS requires total >= 1, visible >= 1, and 2 * visible >= total
+                                ack_res = session.post(
+                                    f"https://{domain}/api/ad/ack",
+                                    json={
+                                        "challengeToken": chal_token,
+                                        "total": 12,      # total ads
+                                        "visible": 12,    # visible ads
+                                        "path": ep_href
+                                    },
+                                    headers=post_headers
+                                )
+
+                                if ack_res.status_code == 200:
+                                    self.log(f"[+] Ad Ack accepted.")
+                                else:
+                                    self.log(f"[-] Ad Ack failed: {ack_res.text}")
+                            else:
+                                self.log(f"[-] Failed to get Ad Challenge token.")
+
+                        elif err_msg == "blocked":
                             self.cancel_requested = True
                             self.log(f"[-] IP-banned from {domain}. Halting queue.")
-                        continue
+
+                        continue  # Skip to next attempt loop
 
                     encrypted_payload = resp_json["payload"]
                     cookie_base_str = nv_cookie.split('.')[0]
