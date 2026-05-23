@@ -19,6 +19,7 @@ from curl_cffi import requests
 from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor
 import sys
+from Crypto.Cipher import AES
 
 # High DPI Awareness for Windows (Fixes blurriness)
 if platform.system() == 'Windows':
@@ -416,7 +417,7 @@ class NovelDownloaderApp:
             return
 
         self.update_domain_btn()
-        domain = self.current_domain or "sbxh1.com"
+        domain = self.current_domain or "sbxh2.com"
 
         headers, cookies = parse_curl_command(curl_cmd)
         if not headers or not cookies:
@@ -513,7 +514,7 @@ class NovelDownloaderApp:
             "sec-fetch-dest": "empty",
             "sec-fetch-mode": "cors",
             "sec-fetch-site": "same-origin",
-            "x-novel-client": "shadow-v2",
+            "x-novel-client": "shadow-v3",
             "Content-Type": "application/json"
         }
         api_headers = {k: v for k, v in api_headers.items() if v}
@@ -765,42 +766,68 @@ class NovelDownloaderApp:
                     post_headers["Referer"] = chapter_url
 
                     content_res = session.post(f"https://{domain}/api/novel-content", json=payload_data, headers=post_headers)
-
                     try:
                         resp_json = content_res.json()
-                    except ValueError:
+                    except ValueError as e:
+                        self.log(f"[-] ValueError on {novel_id}/{ep_id} content: {e}")
                         continue
 
                     if not resp_json.get("ok"):
+                        self.log(f"[-] Failed response for {novel_id}/{ep_id} content: {resp_json}")
                         if resp_json.get("error") == "expired":
                             issue_headers = api_headers.copy()
                             issue_headers["Referer"] = chapter_url
                             session.post(f"https://{domain}/api/nv-issue", headers=issue_headers)
                         elif resp_json.get("error") == "blocked":
                             self.cancel_requested = True
-                            self.log("[-] True block detected. Halting queue.")
+                            self.log(f"[-] IP-banned from {domain}. Halting queue.")
                         continue
 
                     encrypted_payload = resp_json["payload"]
-                    xor_key_str = nv_cookie.split('.')[0]
-                    xor_key_bytes = b64url_decode(xor_key_str)
-                    encrypted_bytes = b64url_decode(encrypted_payload)
+                    cookie_base_str = nv_cookie.split('.')[0]
+                    cookie_bytes = b64url_decode(cookie_base_str)
+                    payload_bytes = b64url_decode(encrypted_payload)
 
-                    decrypted_bytes = bytearray(len(encrypted_bytes))
-                    for j in range(len(encrypted_bytes)):
-                        decrypted_bytes[j] = encrypted_bytes[j] ^ xor_key_bytes[j % len(xor_key_bytes)]
+                    iv = payload_bytes[:12]
+                    ciphertext_with_tag = payload_bytes[12:]
+                    ciphertext = ciphertext_with_tag[:-16]
+                    tag = ciphertext_with_tag[-16:]
 
-                    plaintext = decrypted_bytes.decode('utf-8')
+                    key_suffix = f":{novel_id}:{ep_id}:v3".encode('utf-8')
+                    aes_key = hashlib.sha256(cookie_bytes + key_suffix).digest()
+
+                    try:
+                        cipher = AES.new(aes_key, AES.MODE_GCM, nonce=iv)
+                        decrypted_bytes = cipher.decrypt_and_verify(ciphertext, tag)
+                        plaintext = decrypted_bytes.decode('utf-8')
+                    except ValueError:
+                        self.log(f"[-] Decryption failed for {ep_title} (Invalid Tag/Corrupt)")
+                        continue
+
                     ch_type = None
 
                     if plaintext.startswith('{'):
                         try:
                             parsed_data = json.loads(plaintext)
                             if isinstance(parsed_data, dict):
-                                if parsed_data.get("kind") == "html" and "html" in parsed_data:
+                                self.log(kind)
+                                kind = parsed_data.get("kind")
+                                if kind == "html" and "html" in parsed_data:
                                     plaintext = parsed_data["html"]
                                     ch_type = "html"
-                                elif parsed_data.get("kind") == "text" and "text" in parsed_data:
+                                elif kind == "text-shuffled" and "paragraphs" in parsed_data and "perm" in parsed_data:
+                                    paragraphs = parsed_data["paragraphs"]
+                                    perm = parsed_data["perm"]
+                                    unshuffled = [""] * len(paragraphs)
+                                    for idx, p_text in enumerate(paragraphs):
+                                        if idx < len(perm):
+                                            dest_idx = int(perm[idx])
+                                            if 0 <= dest_idx < len(unshuffled):
+                                                unshuffled[dest_idx] = p_text
+                                    plaintext = "\n\n".join([p for p in unshuffled if p])
+                                elif kind == "text" and "paragraphs" in parsed_data:
+                                    plaintext = "\n\n".join(parsed_data["paragraphs"])
+                                elif kind == "text" and "text" in parsed_data:
                                     plaintext = parsed_data["text"]
                                 elif "text" in parsed_data:
                                     plaintext = parsed_data["text"]
@@ -815,7 +842,7 @@ class NovelDownloaderApp:
                         save_cache()
 
                     success = True
-                    self.log(f"[+] Downloaded: {ep_title}")
+                    self.log(f"[+] Downloaded {novel_id}/{ep_id}: {ep_title}")
                     if not is_retry:
                         with progress_lock:
                             new_downloads[0] += 1
