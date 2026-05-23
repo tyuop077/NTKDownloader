@@ -14,14 +14,13 @@ import tkinter as tk
 import gzip
 from tkinter import ttk, scrolledtext, messagebox
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, unquote
 from curl_cffi import requests
 from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor
 import sys
 from Crypto.Cipher import AES
 import subprocess
-import webbrowser
 
 APP_VERSION = "v1.3.0"
 
@@ -472,8 +471,10 @@ class NovelDownloaderApp:
 
     def download_worker(self, novel_ids, headers, cookies, domain):
         total_new_chapters = 0
+
         try:
             self.log(f"\n[*] Parsed Headers and Cookies successfully. Target Domain: {domain}")
+
             for i, novel_id in enumerate(novel_ids):
                 if self.cancel_requested:
                     break
@@ -533,21 +534,15 @@ class NovelDownloaderApp:
             "Content-Type": "application/json"
         }
 
-        # Dynamically inject sec-ch-ua headers provided in the curl command
         for k, v in parsed_headers.items():
             if k.lower().startswith("sec-ch-ua"):
                 doc_headers[k] = v
                 api_headers[k] = v
 
-        def create_clean_session():
-            s = requests.Session(impersonate="chrome120")
-            for k, v in parsed_cookies.items():
-                s.cookies.set(k, v, domain=domain)
-            s.headers.update({"User-Agent": ua_exact})
-            return s
-
-        # Fetch Index Page
-        index_session = create_clean_session()
+        # Fetch Index Page (using temporary session)
+        index_session = requests.Session(impersonate="chrome120")
+        for k, v in parsed_cookies.items():
+            index_session.cookies.set(k, v, domain=domain)
         index_url = f"https://{domain}/novel/{novel_id}"
         self.log(f"[*] Fetching index page...")
 
@@ -564,7 +559,6 @@ class NovelDownloaderApp:
             self.log(f"[-] ERROR: Unexpected HTTP error fetching index. (HTTP {res.status_code})")
             return 0
 
-        # Extract precise title using OpenGraph or <title>
         title_match = re.search(r'<meta property="og:title"\s+content="([^"]+)"', res.text)
         if not title_match:
             title_match = re.search(r'<title>([^<]+)</title>', res.text)
@@ -574,7 +568,6 @@ class NovelDownloaderApp:
         else:
             raw_title = f"Novel_{novel_id}"
 
-        # Strip illegal characters for Windows filenames
         safe_title = re.sub(r'[\\/*?:"<>|]', "", raw_title).strip()
         self.log(f"[+] Title: {raw_title}")
 
@@ -642,7 +635,6 @@ class NovelDownloaderApp:
             except Exception as e:
                 self.log(f"[-] Cache write error: {e}")
 
-        # Automigration for v1/v2 caches containing raw JSON strings
         needs_rewrite = False
         if cache_version < 3:
             for eid, ch in list(cached_data.items()):
@@ -673,7 +665,6 @@ class NovelDownloaderApp:
             self.log(f"[*] Upgrading cache format to v3...")
             save_cache()
 
-        # Concurrency Tools
         cache_lock = threading.Lock()
         progress_lock = threading.Lock()
         thread_local = threading.local()
@@ -687,16 +678,47 @@ class NovelDownloaderApp:
         except:
             max_workers = 1
 
-        def get_thread_session():
-            if not hasattr(thread_local, "session"):
-                s = create_clean_session()
-                issue_headers = api_headers.copy()
-                if "Content-Type" in issue_headers:
-                    del issue_headers["Content-Type"]
-                issue_headers["Referer"] = index_url
-                s.post(f"https://{domain}/api/nv-issue", headers=issue_headers)
-                thread_local.session = s
-            return thread_local.session
+        def get_thread_context():
+            if not hasattr(thread_local, "t_cookies"):
+                t_session = requests.Session(impersonate="chrome120")
+                t_session.headers.update({"User-Agent": ua_exact})
+                t_cookies = parsed_cookies.copy()
+
+                def do_req(method, url, **kwargs):
+                    # Radically enforce isolation by rebuilding the jar from our dictionary before EVERY request
+                    t_session.cookies.jar.clear()
+                    for k, v in t_cookies.items():
+                        t_session.cookies.set(k, v, domain=domain)
+
+                    r = t_session.request(method, url, **kwargs)
+
+                    # Manually parse Set-Cookie headers to guarantee updates
+                    for k, v in r.headers.multi_items():
+                        if k.lower() == 'set-cookie':
+                            cookie_part = v.split(';')[0]
+                            if '=' in cookie_part:
+                                c_name, c_val = cookie_part.split('=', 1)
+                                t_cookies[c_name.strip()] = c_val.strip()
+                    return r
+
+                thread_local.do_req = do_req
+                thread_local.t_cookies = t_cookies
+
+                # Session Initialization identical to browser
+                try:
+                    do_req("GET", f"https://{domain}/api/me", headers=api_headers, timeout=10)
+                    if not t_cookies.get("__ntk_ev_id"):
+                        t_cookies["__ntk_ev_id"] = os.urandom(32).hex()
+
+                    sync_headers = api_headers.copy()
+                    sync_headers["Referer"] = index_url
+                    if "Content-Type" in sync_headers:
+                        del sync_headers["Content-Type"]
+                    do_req("POST", f"https://{domain}/api/ev/sync", json={"evId": t_cookies["__ntk_ev_id"]}, headers=sync_headers, timeout=10)
+                except Exception:
+                    pass
+
+            return thread_local.do_req, thread_local.t_cookies
 
         def process_chapter(ep_tuple, is_retry=False):
             if self.cancel_requested:
@@ -704,7 +726,8 @@ class NovelDownloaderApp:
 
             idx, ep_num, ep_href, ep_title = ep_tuple
             ep_id = ep_href.split('/')[-1]
-            chapter_url = f"https://{domain}{ep_href}"
+            chap_path = f"/novel/{novel_id}/{ep_id}"
+            chapter_url = f"https://{domain}{chap_path}"
 
             with cache_lock:
                 if ep_id in cached_data:
@@ -720,8 +743,9 @@ class NovelDownloaderApp:
             else:
                 self.log(f"[*] Retrying missing chapter: {ep_title}")
 
-            session = get_thread_session()
+            do_req, t_cookies = get_thread_context()
             success = False
+            force_nv_reissue = False
 
             for attempt in range(MAX_RETRIES + 1):
                 if self.cancel_requested:
@@ -731,19 +755,26 @@ class NovelDownloaderApp:
                     time.sleep(1)
 
                 try:
+                    # 1. Fetch HTML
                     chap_get_headers = doc_headers.copy()
                     chap_get_headers["Referer"] = index_url
                     cb = int(time.time() * 1000)
-                    chap_res = session.get(f"{chapter_url}?cb={cb}", headers=chap_get_headers)
+                    chap_res = do_req("GET", f"{chapter_url}?cb={cb}", headers=chap_get_headers, timeout=15)
 
                     if chap_res.status_code != 200 or "Just a moment" in chap_res.text or "cf-browser-verification" in chap_res.text:
+                        self.log(f"[-] Cloudflare or server error on HTML fetch for {ep_title} (HTTP {chap_res.status_code}).")
                         continue
 
                     if "본문이 아직 준비되지 않았습니다" in chap_res.text:
+                        # Fallback for novelpia
+                        fallback_session = requests.Session(impersonate="chrome120")
+                        for k, v in t_cookies.items():
+                            fallback_session.cookies.set(k, v, domain=domain)
+
                         np_match = re.search(r'href="https://novelpia\.com/viewer/(\d+)"', chap_res.text)
                         if np_match:
                             np_id = np_match.group(1)
-                            np_html = self.fetch_novelpia_fallback(session, np_id)
+                            np_html = self.fetch_novelpia_fallback(fallback_session, np_id)
                             if np_html:
                                 with cache_lock:
                                     cached_data[ep_id] = {"title": ep_title, "text": np_html, "type": "html"}
@@ -754,7 +785,6 @@ class NovelDownloaderApp:
                                     with progress_lock:
                                         new_downloads[0] += 1
                                 break
-
                         if not is_retry:
                             with cache_lock:
                                 missing_eps.append(ep_tuple)
@@ -764,97 +794,95 @@ class NovelDownloaderApp:
                         success = True
                         break
 
-                    token_match = re.search(r'\\"token\\":\\"([^\\"]+)\\"', chap_res.text)
-                    if not token_match:
-                        token_match = re.search(r'"token":"([^"]+)"', chap_res.text)
+                    token_match = re.search(r'(?:\\"|")token(?:\\"|")\s*:\s*(?:\\"|")([A-Za-z0-9_=-]+(?:\.[A-Za-z0-9_=-]+)+)(?:\\"|")', chap_res.text)
                     if not token_match:
                         self.log(f"[-] Token missing in HTML for {ep_title}")
                         continue
-
                     token = token_match.group(1)
-                    nv_cookie = session.cookies.get("nv")
 
-                    if not nv_cookie:
-                        self.log(f"[-] Missing 'nv' cookie. Calling nv-issue...")
-                        issue_headers = api_headers.copy()
+                    req_headers = api_headers.copy()
+                    req_headers["Referer"] = chapter_url
+
+                    # 2. Scope the ad_ack explicitly per episode
+                    chal_res = do_req("POST", f"https://{domain}/api/ad/challenge", json={"path": chap_path}, headers=req_headers, timeout=10)
+                    chal_data = chal_res.json() if chal_res.status_code == 200 else {}
+
+                    if chal_data and "challenge" in chal_data:
+                        chal_token = chal_data["challenge"]["token"]
+                        canary_url = chal_data["challenge"].get("canaryUrl")
+
+                        # 3. Hit the canary URL
+                        if canary_url:
+                            canary_headers = doc_headers.copy()
+                            canary_headers["sec-fetch-dest"] = "image"
+                            canary_headers["Referer"] = chapter_url
+                            do_req("GET", f"https://{domain}{canary_url}", headers=canary_headers, timeout=10)
+
+                        # 4. Acknowledge the ad challenge
+                        ack_res = do_req("POST", f"https://{domain}/api/ad/ack", json={"challengeToken": chal_token, "total": 24, "visible": 24, "path": chap_path}, headers=req_headers, timeout=10)
+                        if ack_res.status_code != 200 or not ack_res.json().get("ok"):
+                            self.log(f"[-] Ad Ack failed: {ack_res.text}")
+
+                    # 5. Check NV Issue
+                    if not t_cookies.get("nv") or force_nv_reissue:
+                        issue_headers = req_headers.copy()
                         if "Content-Type" in issue_headers:
                             del issue_headers["Content-Type"]
-                        issue_headers["Referer"] = chapter_url
-                        session.post(f"https://{domain}/api/nv-issue", headers=issue_headers)
-                        continue
 
+                        do_req("POST", f"https://{domain}/api/nv-issue", headers=issue_headers, timeout=10)
+
+                        if t_cookies.get("nv"):
+                            force_nv_reissue = False
+                            self.log(f"[+] Re-issued fresh NV token successfully.")
+                        else:
+                            self.log(f"[-] Missing 'nv' cookie after issue request.")
+                            continue
+
+                    # 6. Request Novel Content
+                    nv_cookie_decoded = unquote(t_cookies.get("nv"))
                     nonce_bytes = os.urandom(24)
                     nonce_str = b64url_encode(nonce_bytes)
                     message = f"{token}.{nonce_str}.{ua_exact}".encode('utf-8')
-                    proof_bytes = hmac.new(nv_cookie.encode('utf-8'), message, hashlib.sha256).digest()
+                    proof_bytes = hmac.new(nv_cookie_decoded.encode('utf-8'), message, hashlib.sha256).digest()
                     proof_str = b64url_encode(proof_bytes)
 
                     payload_data = {
-                        "novelId": novel_id, "episodeId": ep_id, "token": token,
+                        "novelId": str(novel_id), "episodeId": str(ep_id), "token": token,
                         "nonce": nonce_str, "proof": proof_str
                     }
 
-                    post_headers = api_headers.copy()
-                    post_headers["Referer"] = chapter_url
-
-                    content_res = session.post(f"https://{domain}/api/novel-content", json=payload_data, headers=post_headers)
+                    content_res = do_req("POST", f"https://{domain}/api/novel-content", json=payload_data, headers=req_headers, timeout=15)
                     try:
                         resp_json = content_res.json()
                     except ValueError as e:
-                        self.log(f"[-] ValueError on {novel_id}/{ep_id} content: {e}")
+                        self.log(f"[-] ValueError parsing novel-content JSON: {e}")
                         continue
 
                     if not resp_json.get("ok"):
-                        self.log(f"[-] Failed response for {novel_id}/{ep_id}: {resp_json}")
                         err_msg = resp_json.get("error")
 
                         if err_msg == "expired":
-                            issue_headers = api_headers.copy()
-                            if "Content-Type" in issue_headers:
-                                del issue_headers["Content-Type"]
-                            issue_headers["Referer"] = chapter_url
-                            issue_res = session.post(f"https://{domain}/api/nv-issue", headers=issue_headers)
-                            self.log(f"[*] nv-issue HTTP {issue_res.status_code}")
+                            self.log(f"[*] NV token expired for {ep_title}. Removing local token to force reissue...")
+                            if "nv" in t_cookies:
+                                del t_cookies["nv"] # Aggressively scrub the dict so the next loop forces a fresh /nv-issue
+                            force_nv_reissue = True
+                            continue
 
                         elif err_msg == "ad_ack_required":
-                            self.log(f"[*] Ad verification required. Solving challenge for {ep_title}...")
-
-                            chal_res = session.post(
-                                f"https://{domain}/api/ad/challenge",
-                                json={"path": ep_href},
-                                headers=post_headers
-                            )
-                            chal_data = chal_res.json() if chal_res.status_code == 200 else {}
-
-                            if chal_data and "challenge" in chal_data:
-                                chal_token = chal_data["challenge"]["token"]
-
-                                ack_res = session.post(
-                                    f"https://{domain}/api/ad/ack",
-                                    json={
-                                        "challengeToken": chal_token,
-                                        "total": 24,
-                                        "visible": 24,
-                                        "path": ep_href
-                                    },
-                                    headers=post_headers
-                                )
-
-                                if ack_res.status_code == 200:
-                                    self.log(f"[+] Ad Ack accepted. Retrying chapter request...")
-                                else:
-                                    self.log(f"[-] Ad Ack failed: {ack_res.text}")
-                            else:
-                                self.log(f"[-] Failed to get Ad Challenge token. HTTP {chal_res.status_code}")
+                            self.log(f"[*] Server explicitly requested ad verification again...")
+                            continue
 
                         elif err_msg == "blocked":
                             self.cancel_requested = True
-                            self.log(f"[-] IP-banned from {domain}. Halting queue.")
+                            self.log(f"[-] True block detected on {domain}. Halting queue.")
+                            break
 
-                        continue
+                        else:
+                            self.log(f"[-] Failed response for {novel_id}/{ep_id}: {resp_json}")
+                            continue
 
                     encrypted_payload = resp_json["payload"]
-                    cookie_base_str = nv_cookie.split('.')[0]
+                    cookie_base_str = nv_cookie_decoded.split('.')[0]
                     cookie_bytes = b64url_decode(cookie_base_str)
                     payload_bytes = b64url_decode(encrypted_payload)
 
@@ -888,9 +916,9 @@ class NovelDownloaderApp:
                                     paragraphs = parsed_data["paragraphs"]
                                     perm = parsed_data["perm"]
                                     unshuffled = [""] * len(paragraphs)
-                                    for idx, p_text in enumerate(paragraphs):
-                                        if idx < len(perm):
-                                            dest_idx = int(perm[idx])
+                                    for p_idx, p_text in enumerate(paragraphs):
+                                        if p_idx < len(perm):
+                                            dest_idx = int(perm[p_idx])
                                             if 0 <= dest_idx < len(unshuffled):
                                                 unshuffled[dest_idx] = p_text
                                     plaintext = "\n\n".join([p for p in unshuffled if p])
