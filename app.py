@@ -22,7 +22,7 @@ import sys
 from Crypto.Cipher import AES
 import subprocess
 
-APP_VERSION = "v1.3.0"
+APP_VERSION = "1.3.1"
 
 try:
     from build_env import GITHUB_REPO
@@ -219,7 +219,7 @@ def build_epub(novel_id, file_title, meta_title, chapters):
 class NovelDownloaderApp:
     def __init__(self, root):
         self.root = root
-        self.root.title(f"NTK Novel Downloader - {APP_VERSION}")
+        self.root.title(f"NTK Novel Downloader v{APP_VERSION}")
         self.root.geometry("850x750")
         self.root.minsize(600, 500)
 
@@ -757,11 +757,11 @@ class NovelDownloaderApp:
                     cb = int(time.time() * 1000)
                     chap_res = session.get(f"{chapter_url}?cb={cb}", headers=chap_get_headers, timeout=15)
 
-                    if chap_res.status_code != 200 or "Just a moment" in chap_res.text or "cf-browser-verification" in chap_res.text:
-                        self.log(f"[-] Cloudflare or server error on HTML fetch for {ep_title} (HTTP {chap_res.status_code}).")
+                    if "Just a moment" in chap_res.text or "cf-browser-verification" in chap_res.text:
+                        self.log(f"[-] Cloudflare block detected on HTML fetch for {ep_title}.")
                         continue
 
-                    if "본문이 아직 준비되지 않았습니다" in chap_res.text:
+                    if chap_res.status_code == 404 or "본문이 아직 준비되지 않았습니다" in chap_res.text:
                         np_match = re.search(r'href="https://novelpia\.com/viewer/(\d+)"', chap_res.text)
                         if np_match:
                             np_id = np_match.group(1)
@@ -776,14 +776,19 @@ class NovelDownloaderApp:
                                     with progress_lock:
                                         new_downloads[0] += 1
                                 break
+
                         if not is_retry:
                             with cache_lock:
                                 missing_eps.append(ep_tuple)
-                            self.log(f"[-] 'Not ready'. Queued for retry: {ep_title}")
+                            self.log(f"[-] 'Not ready' (HTTP {chap_res.status_code}). Queued for retry: {ep_title}")
                         else:
                             self.log(f"[-] Still 'Not ready' on retry: {ep_title}")
                         success = True
                         break
+
+                    if chap_res.status_code != 200:
+                        self.log(f"[-] Server error on HTML fetch for {ep_title} (HTTP {chap_res.status_code}).")
+                        continue
 
                     tokens = re.findall(r'(?:\\"|")token(?:\\"|")\s*:\s*(?:\\"|")([A-Za-z0-9_=-]+(?:\.[A-Za-z0-9_=-]+)+)(?:\\"|")', chap_res.text)
                     token = next((t for t in tokens if t.startswith("eyJuIjoi") or t.startswith("eyJlIjoi")), None)
@@ -1042,12 +1047,14 @@ class NovelDownloaderApp:
                             }
                             self.root.after(0, self.show_update_bar, latest_tag)
                             break
+            else:
+                self.log(f"[-] Updater: API returned HTTP {res.status_code}")
         except Exception as e:
             self.log(f"[-] Updater: Error checking for updates ({e})")
 
     def show_update_bar(self, new_version):
         self.update_label.config(text=f"New version {new_version} available! (Current: {APP_VERSION})")
-        self.update_frame.pack(side=tk.BOTTOM, fill=tk.X)
+        self.update_frame.pack(side=tk.BOTTOM, fill=tk.X, before=self.paned)
 
     def start_auto_update(self):
         self.update_btn.config(state=tk.DISABLED, text="Downloading...")
