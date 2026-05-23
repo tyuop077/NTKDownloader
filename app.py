@@ -79,6 +79,12 @@ def b64url_decode(data: str) -> bytes:
     padding = '=' * (4 - (len(data) % 4)) if len(data) % 4 != 0 else ''
     return base64.urlsafe_b64decode(data + padding)
 
+def get_cookie_value(session, name):
+    for cookie in session.cookies.jar:
+        if cookie.name.lower() == name.lower():
+            return cookie.value
+    return None
+
 def parse_curl_command(curl_command):
     headers = {}
     cookies = {}
@@ -302,7 +308,7 @@ class NovelDownloaderApp:
         self.update_btn = ttk.Button(self.update_frame, text="Download & Restart", command=self.start_auto_update)
         self.update_btn.pack(side=tk.RIGHT, padx=10, pady=2)
 
-        self.update_info = {} # Stores url, asset_name, release_page
+        self.update_info = {}
 
         self.bottom_frame = ttk.Frame(self.paned)
         self.paned.add(self.bottom_frame, minsize=200)
@@ -534,15 +540,26 @@ class NovelDownloaderApp:
             "Content-Type": "application/json"
         }
 
+        # Dynamically inject sec-ch-ua headers provided in the curl command
         for k, v in parsed_headers.items():
             if k.lower().startswith("sec-ch-ua"):
                 doc_headers[k] = v
                 api_headers[k] = v
 
-        # Fetch Index Page (using temporary session)
-        index_session = requests.Session(impersonate="chrome120")
-        for k, v in parsed_cookies.items():
-            index_session.cookies.set(k, v, domain=domain)
+        # By explicitly filtering out the volatile cookies from initialization,
+        # we bypass libcurl's domain-vs-host cookie shadowing problem completely.
+        volatile_keys = {"nv", "ad_ack", "ntk_blk_ok_sig", "__ntk_ev_id"}
+        clean_cookies = {k: v for k, v in parsed_cookies.items() if k.lower() not in volatile_keys}
+
+        def create_clean_session():
+            s = requests.Session(impersonate="chrome120")
+            for k, v in clean_cookies.items():
+                s.cookies.set(k, v, domain=domain)
+            s.headers.update({"User-Agent": ua_exact})
+            return s
+
+        # Fetch Index Page
+        index_session = create_clean_session()
         index_url = f"https://{domain}/novel/{novel_id}"
         self.log(f"[*] Fetching index page...")
 
@@ -568,6 +585,7 @@ class NovelDownloaderApp:
         else:
             raw_title = f"Novel_{novel_id}"
 
+        # Strip illegal characters for Windows filenames
         safe_title = re.sub(r'[\\/*?:"<>|]', "", raw_title).strip()
         self.log(f"[+] Title: {raw_title}")
 
@@ -678,47 +696,25 @@ class NovelDownloaderApp:
         except:
             max_workers = 1
 
-        def get_thread_context():
-            if not hasattr(thread_local, "t_cookies"):
-                t_session = requests.Session(impersonate="chrome120")
-                t_session.headers.update({"User-Agent": ua_exact})
-                t_cookies = parsed_cookies.copy()
-
-                def do_req(method, url, **kwargs):
-                    # Radically enforce isolation by rebuilding the jar from our dictionary before EVERY request
-                    t_session.cookies.jar.clear()
-                    for k, v in t_cookies.items():
-                        t_session.cookies.set(k, v, domain=domain)
-
-                    r = t_session.request(method, url, **kwargs)
-
-                    # Manually parse Set-Cookie headers to guarantee updates
-                    for k, v in r.headers.multi_items():
-                        if k.lower() == 'set-cookie':
-                            cookie_part = v.split(';')[0]
-                            if '=' in cookie_part:
-                                c_name, c_val = cookie_part.split('=', 1)
-                                t_cookies[c_name.strip()] = c_val.strip()
-                    return r
-
-                thread_local.do_req = do_req
-                thread_local.t_cookies = t_cookies
-
-                # Session Initialization identical to browser
+        def get_thread_session():
+            if not hasattr(thread_local, "session"):
+                s = create_clean_session()
+                # Imitate exactly what the browser does on first load
                 try:
-                    do_req("GET", f"https://{domain}/api/me", headers=api_headers, timeout=10)
-                    if not t_cookies.get("__ntk_ev_id"):
-                        t_cookies["__ntk_ev_id"] = os.urandom(32).hex()
-
+                    s.get(f"https://{domain}/api/me", headers=api_headers, timeout=10)
+                    ev_id = get_cookie_value(s, "__ntk_ev_id")
+                    if not ev_id:
+                        ev_id = os.urandom(32).hex()
+                        s.cookies.set("__ntk_ev_id", ev_id, domain=domain)
                     sync_headers = api_headers.copy()
                     sync_headers["Referer"] = index_url
                     if "Content-Type" in sync_headers:
                         del sync_headers["Content-Type"]
-                    do_req("POST", f"https://{domain}/api/ev/sync", json={"evId": t_cookies["__ntk_ev_id"]}, headers=sync_headers, timeout=10)
+                    s.post(f"https://{domain}/api/ev/sync", json={"evId": ev_id}, headers=sync_headers, timeout=10)
                 except Exception:
                     pass
-
-            return thread_local.do_req, thread_local.t_cookies
+                thread_local.session = s
+            return thread_local.session
 
         def process_chapter(ep_tuple, is_retry=False):
             if self.cancel_requested:
@@ -743,7 +739,7 @@ class NovelDownloaderApp:
             else:
                 self.log(f"[*] Retrying missing chapter: {ep_title}")
 
-            do_req, t_cookies = get_thread_context()
+            session = get_thread_session()
             success = False
             force_nv_reissue = False
 
@@ -759,22 +755,17 @@ class NovelDownloaderApp:
                     chap_get_headers = doc_headers.copy()
                     chap_get_headers["Referer"] = index_url
                     cb = int(time.time() * 1000)
-                    chap_res = do_req("GET", f"{chapter_url}?cb={cb}", headers=chap_get_headers, timeout=15)
+                    chap_res = session.get(f"{chapter_url}?cb={cb}", headers=chap_get_headers, timeout=15)
 
                     if chap_res.status_code != 200 or "Just a moment" in chap_res.text or "cf-browser-verification" in chap_res.text:
                         self.log(f"[-] Cloudflare or server error on HTML fetch for {ep_title} (HTTP {chap_res.status_code}).")
                         continue
 
                     if "본문이 아직 준비되지 않았습니다" in chap_res.text:
-                        # Fallback for novelpia
-                        fallback_session = requests.Session(impersonate="chrome120")
-                        for k, v in t_cookies.items():
-                            fallback_session.cookies.set(k, v, domain=domain)
-
                         np_match = re.search(r'href="https://novelpia\.com/viewer/(\d+)"', chap_res.text)
                         if np_match:
                             np_id = np_match.group(1)
-                            np_html = self.fetch_novelpia_fallback(fallback_session, np_id)
+                            np_html = self.fetch_novelpia_fallback(session, np_id)
                             if np_html:
                                 with cache_lock:
                                     cached_data[ep_id] = {"title": ep_title, "text": np_html, "type": "html"}
@@ -804,42 +795,71 @@ class NovelDownloaderApp:
                     req_headers["Referer"] = chapter_url
 
                     # 2. Scope the ad_ack explicitly per episode
-                    chal_res = do_req("POST", f"https://{domain}/api/ad/challenge", json={"path": chap_path}, headers=req_headers, timeout=10)
+                    chal_res = session.post(f"https://{domain}/api/ad/challenge", json={"path": chap_path}, headers=req_headers, timeout=10)
                     chal_data = chal_res.json() if chal_res.status_code == 200 else {}
 
                     if chal_data and "challenge" in chal_data:
-                        chal_token = chal_data["challenge"]["token"]
-                        canary_url = chal_data["challenge"].get("canaryUrl")
+                        challenge = chal_data["challenge"]
+                        chal_token = challenge.get("token")
+                        canary_url = challenge.get("canaryUrl")
+                        slot_nonces = challenge.get("slotNonces", [])
 
-                        # 3. Hit the canary URL
+                        canary_headers = doc_headers.copy()
+                        canary_headers["sec-fetch-dest"] = "image"
+                        canary_headers["sec-fetch-mode"] = "no-cors"
+                        canary_headers["Accept"] = "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"
+                        canary_headers["Referer"] = chapter_url
+
+                        # 3. Hit the invisible tracking pixels (slot nonces)
+                        for nonce in slot_nonces:
+                            imp_url = f"https://{domain}/api/ad/impression?t={chal_token}&s={nonce}"
+                            session.get(imp_url, headers=canary_headers, timeout=10)
+
+                        # 4. Hit the primary canary URL
                         if canary_url:
-                            canary_headers = doc_headers.copy()
-                            canary_headers["sec-fetch-dest"] = "image"
-                            canary_headers["Referer"] = chapter_url
-                            do_req("GET", f"https://{domain}{canary_url}", headers=canary_headers, timeout=10)
+                            session.get(f"https://{domain}{canary_url}", headers=canary_headers, timeout=10)
 
-                        # 4. Acknowledge the ad challenge
-                        ack_res = do_req("POST", f"https://{domain}/api/ad/ack", json={"challengeToken": chal_token, "total": 24, "visible": 24, "path": chap_path}, headers=req_headers, timeout=10)
-                        if ack_res.status_code != 200 or not ack_res.json().get("ok"):
-                            self.log(f"[-] Ad Ack failed: {ack_res.text}")
+                        # 5. Acknowledge the ad challenge
+                        ack_res = session.post(
+                            f"https://{domain}/api/ad/ack",
+                            json={
+                                "challengeToken": chal_token,
+                                "total": 24,
+                                "visible": 24,
+                                "path": chap_path
+                            },
+                            headers=req_headers,
+                            timeout=10
+                        )
 
-                    # 5. Check NV Issue
-                    if not t_cookies.get("nv") or force_nv_reissue:
+                        if ack_res.status_code == 200:
+                            ack_json = ack_res.json()
+                            if not ack_json.get("ok"):
+                                self.log(f"[-] Ad Ack failed: {ack_res.text}")
+                            elif ack_json.get("impression", {}).get("ok") is False:
+                                self.log(f"[-] Warning: Server rejected impression tracking: {ack_json}")
+                        else:
+                            self.log(f"[-] Ad Ack HTTP {ack_res.status_code}: {ack_res.text}")
+
+                    # 6. Check NV Issue
+                    nv_cookie = get_cookie_value(session, "nv")
+                    if not nv_cookie or force_nv_reissue:
                         issue_headers = req_headers.copy()
                         if "Content-Type" in issue_headers:
                             del issue_headers["Content-Type"]
 
-                        do_req("POST", f"https://{domain}/api/nv-issue", headers=issue_headers, timeout=10)
+                        session.post(f"https://{domain}/api/nv-issue", headers=issue_headers, timeout=10)
 
-                        if t_cookies.get("nv"):
+                        nv_cookie = get_cookie_value(session, "nv")
+                        if nv_cookie:
                             force_nv_reissue = False
                             self.log(f"[+] Re-issued fresh NV token successfully.")
                         else:
                             self.log(f"[-] Missing 'nv' cookie after issue request.")
                             continue
 
-                    # 6. Request Novel Content
-                    nv_cookie_decoded = unquote(t_cookies.get("nv"))
+                    # 7. Request Novel Content
+                    nv_cookie_decoded = unquote(nv_cookie)
                     nonce_bytes = os.urandom(24)
                     nonce_str = b64url_encode(nonce_bytes)
                     message = f"{token}.{nonce_str}.{ua_exact}".encode('utf-8')
@@ -851,7 +871,7 @@ class NovelDownloaderApp:
                         "nonce": nonce_str, "proof": proof_str
                     }
 
-                    content_res = do_req("POST", f"https://{domain}/api/novel-content", json=payload_data, headers=req_headers, timeout=15)
+                    content_res = session.post(f"https://{domain}/api/novel-content", json=payload_data, headers=req_headers, timeout=15)
                     try:
                         resp_json = content_res.json()
                     except ValueError as e:
@@ -862,9 +882,10 @@ class NovelDownloaderApp:
                         err_msg = resp_json.get("error")
 
                         if err_msg == "expired":
-                            self.log(f"[*] NV token expired for {ep_title}. Removing local token to force reissue...")
-                            if "nv" in t_cookies:
-                                del t_cookies["nv"] # Aggressively scrub the dict so the next loop forces a fresh /nv-issue
+                            self.log(f"[*] NV token expired for {ep_title}. Forcing reissue...")
+                            # Since we stripped the domain cookie at initialization,
+                            # we can just flag it and hit /api/nv-issue on the next loop
+                            # and curl_cffi will natively overwrite it.
                             force_nv_reissue = True
                             continue
 
