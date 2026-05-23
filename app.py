@@ -785,11 +785,12 @@ class NovelDownloaderApp:
                         success = True
                         break
 
-                    token_match = re.search(r'(?:\\"|")token(?:\\"|")\s*:\s*(?:\\"|")([A-Za-z0-9_=-]+(?:\.[A-Za-z0-9_=-]+)+)(?:\\"|")', chap_res.text)
-                    if not token_match:
-                        self.log(f"[-] Token missing in HTML for {ep_title}")
+                    tokens = re.findall(r'(?:\\"|")token(?:\\"|")\s*:\s*(?:\\"|")([A-Za-z0-9_=-]+(?:\.[A-Za-z0-9_=-]+)+)(?:\\"|")', chap_res.text)
+                    token = next((t for t in tokens if t.startswith("eyJuIjoi") or t.startswith("eyJlIjoi")), None)
+
+                    if not token:
+                        self.log(f"[-] Novel token missing in HTML for {ep_title}")
                         continue
-                    token = token_match.group(1)
 
                     req_headers = api_headers.copy()
                     req_headers["Referer"] = chapter_url
