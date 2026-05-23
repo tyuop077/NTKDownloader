@@ -488,42 +488,41 @@ class NovelDownloaderApp:
                     return v
             return ""
 
-        ua_exact = get_header("user-agent") or parsed_headers.get("User-Agent", "")
+        ua_exact = get_header("user-agent") or parsed_headers.get("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
+        # Base headers
         doc_headers = {
             "User-Agent": ua_exact,
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-            "Accept-Language": get_header("accept-language") or "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
-            "sec-ch-ua": get_header("sec-ch-ua"),
-            "sec-ch-ua-mobile": get_header("sec-ch-ua-mobile"),
-            "sec-ch-ua-platform": get_header("sec-ch-ua-platform"),
+            "Accept-Language": get_header("accept-language") or "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
             "sec-fetch-dest": "document",
             "sec-fetch-mode": "navigate",
             "sec-fetch-site": "same-origin",
             "upgrade-insecure-requests": "1"
         }
-        doc_headers = {k: v for k, v in doc_headers.items() if v}
 
         api_headers = {
             "User-Agent": ua_exact,
             "Accept": "*/*",
-            "Accept-Language": get_header("accept-language") or "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
-            "sec-ch-ua": get_header("sec-ch-ua"),
-            "sec-ch-ua-mobile": get_header("sec-ch-ua-mobile"),
-            "sec-ch-ua-platform": get_header("sec-ch-ua-platform"),
+            "Accept-Language": get_header("accept-language") or "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
             "sec-fetch-dest": "empty",
             "sec-fetch-mode": "cors",
             "sec-fetch-site": "same-origin",
             "x-novel-client": "shadow-v3",
             "Content-Type": "application/json"
         }
-        api_headers = {k: v for k, v in api_headers.items() if v}
+
+        # Dynamically inject sec-ch-ua headers provided in the curl command
+        for k, v in parsed_headers.items():
+            if k.lower().startswith("sec-ch-ua"):
+                doc_headers[k] = v
+                api_headers[k] = v
 
         def create_clean_session():
             s = requests.Session(impersonate="chrome120")
             for k, v in parsed_cookies.items():
-                if k.lower() != "nv":
-                    s.cookies.set(k, v, domain=domain)
+                s.cookies.set(k, v, domain=domain)
+            s.headers.update({"User-Agent": ua_exact})
             return s
 
         # Fetch Index Page
@@ -671,6 +670,8 @@ class NovelDownloaderApp:
             if not hasattr(thread_local, "session"):
                 s = create_clean_session()
                 issue_headers = api_headers.copy()
+                if "Content-Type" in issue_headers:
+                    del issue_headers["Content-Type"]
                 issue_headers["Referer"] = index_url
                 s.post(f"https://{domain}/api/nv-issue", headers=issue_headers)
                 thread_local.session = s
@@ -746,10 +747,20 @@ class NovelDownloaderApp:
                     if not token_match:
                         token_match = re.search(r'"token":"([^"]+)"', chap_res.text)
                     if not token_match:
+                        self.log(f"[-] Token missing in HTML for {ep_title}")
                         continue
 
                     token = token_match.group(1)
                     nv_cookie = session.cookies.get("nv")
+
+                    if not nv_cookie:
+                        self.log(f"[-] Missing 'nv' cookie. Calling nv-issue...")
+                        issue_headers = api_headers.copy()
+                        if "Content-Type" in issue_headers:
+                            del issue_headers["Content-Type"]
+                        issue_headers["Referer"] = chapter_url
+                        session.post(f"https://{domain}/api/nv-issue", headers=issue_headers)
+                        continue
 
                     nonce_bytes = os.urandom(24)
                     nonce_str = b64url_encode(nonce_bytes)
@@ -773,17 +784,20 @@ class NovelDownloaderApp:
                         continue
 
                     if not resp_json.get("ok"):
-                        self.log(f"[-] Failed response for {novel_id}/{ep_id} content: {resp_json}")
+                        self.log(f"[-] Failed response for {novel_id}/{ep_id}: {resp_json}")
                         err_msg = resp_json.get("error")
+
                         if err_msg == "expired":
                             issue_headers = api_headers.copy()
+                            if "Content-Type" in issue_headers:
+                                del issue_headers["Content-Type"]
                             issue_headers["Referer"] = chapter_url
-                            session.post(f"https://{domain}/api/nv-issue", headers=issue_headers)
+                            issue_res = session.post(f"https://{domain}/api/nv-issue", headers=issue_headers)
+                            self.log(f"[*] nv-issue HTTP {issue_res.status_code}")
 
                         elif err_msg == "ad_ack_required":
-                            self.log(f"[*] Ad verification required for {ep_title}. Sending Ack...")
+                            self.log(f"[*] Ad verification required. Solving challenge for {ep_title}...")
 
-                            # 1. Fetch the Challenge Token
                             chal_res = session.post(
                                 f"https://{domain}/api/ad/challenge",
                                 json={"path": ep_href},
@@ -794,31 +808,29 @@ class NovelDownloaderApp:
                             if chal_data and "challenge" in chal_data:
                                 chal_token = chal_data["challenge"]["token"]
 
-                                # 2. Submit the Ad Ack
-                                # The JS requires total >= 1, visible >= 1, and 2 * visible >= total
                                 ack_res = session.post(
                                     f"https://{domain}/api/ad/ack",
                                     json={
                                         "challengeToken": chal_token,
-                                        "total": 12,      # total ads
-                                        "visible": 12,    # visible ads
+                                        "total": 24,
+                                        "visible": 24,
                                         "path": ep_href
                                     },
                                     headers=post_headers
                                 )
 
                                 if ack_res.status_code == 200:
-                                    self.log(f"[+] Ad Ack accepted.")
+                                    self.log(f"[+] Ad Ack accepted. Retrying chapter request...")
                                 else:
                                     self.log(f"[-] Ad Ack failed: {ack_res.text}")
                             else:
-                                self.log(f"[-] Failed to get Ad Challenge token.")
+                                self.log(f"[-] Failed to get Ad Challenge token. HTTP {chal_res.status_code}")
 
                         elif err_msg == "blocked":
                             self.cancel_requested = True
                             self.log(f"[-] IP-banned from {domain}. Halting queue.")
 
-                        continue  # Skip to next attempt loop
+                        continue
 
                     encrypted_payload = resp_json["payload"]
                     cookie_base_str = nv_cookie.split('.')[0]
@@ -847,7 +859,6 @@ class NovelDownloaderApp:
                         try:
                             parsed_data = json.loads(plaintext)
                             if isinstance(parsed_data, dict):
-                                self.log(kind)
                                 kind = parsed_data.get("kind")
                                 if kind == "html" and "html" in parsed_data:
                                     plaintext = parsed_data["html"]
@@ -886,7 +897,7 @@ class NovelDownloaderApp:
                     break
 
                 except Exception as e:
-                    pass
+                    self.log(f"[-] Attempt failed for {ep_title}: {e}")
 
             if not success and not self.cancel_requested:
                 self.log(f"[!] FATAL: Failed to download '{ep_title}' after retries. Halting novel.")
