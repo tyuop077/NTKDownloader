@@ -27,6 +27,10 @@ jobs:
           pip install pyinstaller
           pip install -r requirements.txt
 
+      - name: Inject Build Variables
+        run: |
+          echo "GITHUB_REPO = '${{ github.repository }}'" > build_env.py
+
       - name: Build Executable via PyInstaller
         run: |
           pyinstaller --onefile --windowed --name "NTK_Downloader" --collect-all curl_cffi app.py

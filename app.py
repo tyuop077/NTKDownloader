@@ -20,6 +20,15 @@ from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor
 import sys
 from Crypto.Cipher import AES
+import subprocess
+import webbrowser
+
+APP_VERSION = "v1.3.0"
+
+try:
+    from build_env import GITHUB_REPO
+except ImportError:
+    GITHUB_REPO = None
 
 # High DPI Awareness for Windows (Fixes blurriness)
 if platform.system() == 'Windows':
@@ -205,7 +214,7 @@ def build_epub(novel_id, file_title, meta_title, chapters):
 class NovelDownloaderApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("NTK Novel Downloader")
+        self.root.title(f"NTK Novel Downloader - {APP_VERSION}")
         self.root.geometry("850x750")
         self.root.minsize(600, 500)
 
@@ -223,6 +232,8 @@ class NovelDownloaderApp:
         self.log("    3. Open DevTools (F12) -> Network tab -> Refresh the page.")
         self.log("    4. Right-click the '-' request -> Copy -> Copy as cURL (bash).")
         self.log("    5. Paste the entire command into the cURL box and start.\n")
+
+        threading.Thread(target=self.check_for_updates, daemon=True).start()
 
     def setup_ui(self):
         style = ttk.Style()
@@ -283,6 +294,16 @@ class NovelDownloaderApp:
 
         self.download_btn = ttk.Button(btn_frame, text="Start Download", command=self.toggle_download)
         self.download_btn.pack(side=tk.LEFT)
+
+        # --- UPDATE BAR ---
+        self.update_frame = tk.Frame(self.root, bg='#ff8c00')
+        self.update_label = tk.Label(self.update_frame, text="Update Available!", bg='#ff8c00', fg='black', font=('Arial', 9, 'bold'))
+        self.update_label.pack(side=tk.LEFT, padx=10, pady=2)
+
+        self.update_btn = ttk.Button(self.update_frame, text="Download & Restart", command=self.start_auto_update)
+        self.update_btn.pack(side=tk.RIGHT, padx=10, pady=2)
+
+        self.update_info = {} # Stores url, asset_name, release_page
 
         self.bottom_frame = ttk.Frame(self.paned)
         self.paned.add(self.bottom_frame, minsize=200)
@@ -942,6 +963,93 @@ class NovelDownloaderApp:
             self.log("[-] No valid chapters found to build EPUB.")
 
         return new_downloads[0]
+
+    def check_for_updates(self):
+        if not getattr(sys, 'frozen', False):
+            self.log("[*] Updater: Running from script. Auto-update disabled.")
+            return
+        if not GITHUB_REPO:
+            self.log("[*] Updater: No repository defined in build. Auto-update disabled.")
+            return
+
+        try:
+            url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+            res = requests.get(url, impersonate="chrome120", timeout=10)
+
+            if res.status_code == 200:
+                data = res.json()
+                latest_tag = data.get("tag_name", "")
+                release_url = data.get("html_url", "")
+
+                if latest_tag and latest_tag != APP_VERSION:
+                    for asset in data.get("assets", []):
+                        asset_name = asset.get("name", "")
+                        if asset_name.endswith(".exe"):
+                            self.update_info = {
+                                "exe_url": asset.get("browser_download_url"),
+                                "asset_name": asset_name,
+                                "release_url": release_url
+                            }
+                            self.root.after(0, self.show_update_bar, latest_tag)
+                            break
+        except Exception as e:
+            self.log(f"[-] Updater: Error checking for updates ({e})")
+
+    def show_update_bar(self, new_version):
+        self.update_label.config(text=f"New version {new_version} available! (Current: {APP_VERSION})")
+        self.update_frame.pack(side=tk.BOTTOM, fill=tk.X)
+
+    def start_auto_update(self):
+        self.update_btn.config(state=tk.DISABLED, text="Downloading...")
+        threading.Thread(target=self._download_and_launch, daemon=True).start()
+
+    def _download_and_launch(self):
+        exe_url = self.update_info.get("exe_url")
+        asset_name = self.update_info.get("asset_name")
+        release_url = self.update_info.get("release_url")
+
+        if not exe_url:
+            webbrowser.open(release_url)
+            self.root.after(0, lambda: self.update_btn.config(text="Opened Browser"))
+            return
+
+        try:
+            self.log(f"\n[*] Downloading update: {asset_name}...")
+            res = requests.get(exe_url, impersonate="chrome120", timeout=30)
+            if res.status_code != 200:
+                raise Exception(f"HTTP {res.status_code}")
+
+            current_exe = sys.executable
+            target_dir = os.path.dirname(current_exe)
+            target_path = os.path.join(target_dir, asset_name)
+
+            # If the downloaded file name matches our currently running locked executable exactly
+            if os.path.abspath(target_path) == os.path.abspath(current_exe):
+                name, ext = os.path.splitext(asset_name)
+                target_path = os.path.join(target_dir, f"{name} (1){ext}")
+
+            # Attempt to write the file. If it fails (e.g. they are running "(1)" and downloading "(1)"),
+            # catch the permission error and fallback to a timestamped name.
+            try:
+                with open(target_path, "wb") as f:
+                    f.write(res.content)
+            except PermissionError:
+                name, ext = os.path.splitext(asset_name)
+                target_path = os.path.join(target_dir, f"{name}_{int(time.time())}{ext}")
+                with open(target_path, "wb") as f:
+                    f.write(res.content)
+
+            self.log(f"[+] Downloaded successfully to: {os.path.basename(target_path)}")
+            self.log("[*] Launching new version and closing current instance...")
+
+            # Launch the new exe and immediately kill this process
+            subprocess.Popen([target_path])
+            os._exit(0)
+
+        except Exception as e:
+            self.log(f"[-] Download failed ({e}). Opening release page instead.")
+            webbrowser.open(release_url)
+            self.root.after(0, lambda: self.update_btn.config(state=tk.NORMAL, text="Update Failed"))
 
 
 if __name__ == "__main__":
