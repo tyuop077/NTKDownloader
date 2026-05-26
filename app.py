@@ -305,7 +305,7 @@ class NovelDownloaderApp:
         self.update_label = tk.Label(self.update_frame, text="Update Available!", bg='#ff8c00', fg='black', font=('Arial', 9, 'bold'))
         self.update_label.pack(side=tk.LEFT, padx=10, pady=2)
 
-        self.update_btn = ttk.Button(self.update_frame, text="Download & Restart", command=self.start_auto_update)
+        self.update_btn = ttk.Button(self.update_frame, text="Download & Restart", command=self.on_update_button_click)
         self.update_btn.pack(side=tk.RIGHT, padx=10, pady=2)
 
         self.update_info = {}
@@ -1021,10 +1021,10 @@ class NovelDownloaderApp:
 
     def check_for_updates(self):
         if not getattr(sys, 'frozen', False):
-            self.log("[*] Updater: Running from script. Auto-update disabled.")
+            self.log("[*] Updater: Running from script. Update checking disabled.")
             return
         if not GITHUB_REPO:
-            self.log("[*] Updater: No repository defined in build. Auto-update disabled.")
+            self.log("[*] Updater: No repository defined in build. Update checking disabled.")
             return
 
         try:
@@ -1056,11 +1056,13 @@ class NovelDownloaderApp:
         self.update_label.config(text=f"New version {new_version} available! (Current: {APP_VERSION})")
         self.update_frame.pack(side=tk.BOTTOM, fill=tk.X, before=self.paned)
 
-    def start_auto_update(self):
+    def on_update_button_click(self):
+        # Start update on "Download & Restart" button click
         self.update_btn.config(state=tk.DISABLED, text="Downloading...")
-        threading.Thread(target=self._download_and_launch, daemon=True).start()
+        threading.Thread(target=self._manual_download_and_relaunch, daemon=True).start()
 
-    def _download_and_launch(self):
+    def _manual_download_and_relaunch(self):
+        # Manual download requested by the user and restart
         exe_url = self.update_info.get("exe_url")
         asset_name = self.update_info.get("asset_name")
         release_url = self.update_info.get("release_url")
@@ -1071,7 +1073,7 @@ class NovelDownloaderApp:
             return
 
         try:
-            self.log(f"\n[*] Downloading update: {asset_name}...")
+            self.log(f"\n[*] Initiated update. Downloading: {asset_name}...")
             res = requests.get(exe_url, impersonate="chrome120", timeout=30)
             if res.status_code != 200:
                 raise Exception(f"HTTP {res.status_code}")
@@ -1097,7 +1099,7 @@ class NovelDownloaderApp:
                     f.write(res.content)
 
             self.log(f"[+] Downloaded successfully to: {os.path.basename(target_path)}")
-            self.log("[*] Launching new version and closing current instance...")
+            self.log("[*] Launching updated version and closing current instance...")
 
             # Launch the new exe and immediately kill this process
             subprocess.Popen([target_path])
