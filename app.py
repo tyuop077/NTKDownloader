@@ -22,7 +22,7 @@ import sys
 from Crypto.Cipher import AES
 import subprocess
 
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.4.1"
 
 try:
     from build_env import GITHUB_REPO
@@ -233,12 +233,12 @@ class NovelDownloaderApp:
         self.log(f"[*] Initialized. EPUBs will be saved to:\n    {BASE_DIR}")
         self.log("[*] Instructions:")
         self.log("    1. Paste novel URLs in the first box.")
-        self.log("    2. Click 'Open [domain]/-' to open the browser page.")
+        self.log("    2. Click 'Open [domain]/-' to open the browser page (404 error is intentional).")
         self.log("    3. Open DevTools (Three Dots Menu -> More Tools -> Developer Tools, or F12).")
         self.log("    4. Go to the Network tab and Refresh the page.")
         self.log("    5. Right-click the '-' request -> Copy -> Copy as cURL (bash or POSIX, not Windows).")
         self.log("    6. Paste the entire command into the cURL box and start.\n")
-        self.log("    * Note: If DevTools closes immediately or is blocked, open a new blank tab, press F12, and navigate to the site manually.\n")
+        self.log("    * Note: If DevTools opening is blocked, open a new blank tab, press F12, and navigate to the site manually.\n")
 
         threading.Thread(target=self.check_for_updates, daemon=True).start()
 
@@ -437,7 +437,7 @@ class NovelDownloaderApp:
         raw_urls = self.urls_text.get("1.0", tk.END).strip()
 
         if not curl_cmd or "curl" not in curl_cmd[:10].lower():
-            messagebox.showerror("Error", "Please paste a valid cURL command starting with 'curl'.")
+            messagebox.showerror("Error", "Please paste a valid cURL command starting with 'curl'.\n\nYou can right-click the request in Developer Tools -> Copy -> Copy as cURL (bash or POSIX, not Windows).")
             return
 
         if not raw_urls:
@@ -473,7 +473,7 @@ class NovelDownloaderApp:
 
         self.is_downloading = True
         self.cancel_requested = False
-        self.block_notified = False
+        self.gui_notified = False
         self.download_btn.config(text="Cancel", state=tk.NORMAL)
 
         threading.Thread(target=self.download_worker, args=(novel_ids, headers, cookies, domain), daemon=True).start()
@@ -567,6 +567,17 @@ class NovelDownloaderApp:
         self.log(f"[*] Fetching index page...")
 
         res = index_session.get(index_url, headers=doc_headers)
+
+        if "error 1006" in res.text.lower():
+            self.cancel_requested = True
+            self.log(f"[-] FATAL: Cloudflare Error 1006 - Your IP is banned.")
+            if not self.gui_notified:
+                self.gui_notified = True
+                self.root.after(0, lambda: messagebox.showerror(
+                    "IP Banned",
+                    "Cloudflare Error 1006: Access Denied.\n\nThe website owner has banned your IP address. You will need to use a VPN or Proxy to continue."
+                ))
+            return 0
 
         cf_keywords = ["cf-browser-verification", "Just a moment", "Ray ID"]
         if res.status_code == 404:
@@ -760,6 +771,18 @@ class NovelDownloaderApp:
                     cb = int(time.time() * 1000)
                     chap_res = session.get(f"{chapter_url}?cb={cb}", headers=chap_get_headers, timeout=15)
 
+                    if "error 1006" in chap_res.text.lower():
+                        self.cancel_requested = True
+                        self.log(f"[-] FATAL: Cloudflare Error 1006 (IP Banned) on {ep_title}.")
+                        with progress_lock:
+                            if not self.gui_notified:
+                                self.gui_notified = True
+                                self.root.after(0, lambda: messagebox.showerror(
+                                    "IP Banned",
+                                    "Cloudflare Error 1006: Access Denied.\n\nThe website owner has banned your IP address. You will need to use a VPN or Proxy to continue."
+                                ))
+                        break
+
                     if "Just a moment" in chap_res.text or "cf-browser-verification" in chap_res.text:
                         self.log(f"[-] Cloudflare block detected on HTML fetch for {ep_title}.")
                         continue
@@ -841,8 +864,8 @@ class NovelDownloaderApp:
                                     self.cancel_requested = True
                                     self.log(f"[-] Block detected on Ad Ack. Halting queue.")
                                     with progress_lock:
-                                        if not self.block_notified:
-                                            self.block_notified = True
+                                        if not self.gui_notified:
+                                            self.gui_notified = True
                                             self.root.after(0, lambda: messagebox.showerror(
                                                 "Access Blocked",
                                                 "Access blocked by the server.\n\nThis is usually a cookie/localstorage anomaly, not an IP block.\n\nPlease clear your browser cookies and localstorage for the site, or open it in a fresh Incognito window, and grab a new cURL command."
@@ -908,8 +931,8 @@ class NovelDownloaderApp:
                             self.cancel_requested = True
                             self.log(f"[-] Block detected on Novel Content. Halting queue.")
                             with progress_lock:
-                                if not self.block_notified:
-                                    self.block_notified = True
+                                if not self.gui_notified:
+                                    self.gui_notified = True
                                     self.root.after(0, lambda: messagebox.showerror(
                                         "Access Blocked",
                                         "Access blocked by the server.\n\nThis is usually a cookie/localstorage anomaly, not an IP block.\n\nPlease clear your browser cookies and localstorage for the site, or open it in a fresh Incognito window, and grab a new cURL command."
