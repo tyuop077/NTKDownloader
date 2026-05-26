@@ -22,7 +22,7 @@ import sys
 from Crypto.Cipher import AES
 import subprocess
 
-APP_VERSION = "1.3.1"
+APP_VERSION = "1.4.0"
 
 try:
     from build_env import GITHUB_REPO
@@ -234,9 +234,11 @@ class NovelDownloaderApp:
         self.log("[*] Instructions:")
         self.log("    1. Paste novel URLs in the first box.")
         self.log("    2. Click 'Open [domain]/-' to open the browser page.")
-        self.log("    3. Open DevTools (F12) -> Network tab -> Refresh the page.")
-        self.log("    4. Right-click the '-' request -> Copy -> Copy as cURL (bash).")
-        self.log("    5. Paste the entire command into the cURL box and start.\n")
+        self.log("    3. Open DevTools (Three Dots Menu -> More Tools -> Developer Tools, or F12).")
+        self.log("    4. Go to the Network tab and Refresh the page.")
+        self.log("    5. Right-click the '-' request -> Copy -> Copy as cURL (bash or POSIX, not Windows).")
+        self.log("    6. Paste the entire command into the cURL box and start.\n")
+        self.log("    * Note: If DevTools closes immediately or is blocked, open a new blank tab, press F12, and navigate to the site manually.\n")
 
         threading.Thread(target=self.check_for_updates, daemon=True).start()
 
@@ -471,6 +473,7 @@ class NovelDownloaderApp:
 
         self.is_downloading = True
         self.cancel_requested = False
+        self.block_notified = False
         self.download_btn.config(text="Cancel", state=tk.NORMAL)
 
         threading.Thread(target=self.download_worker, args=(novel_ids, headers, cookies, domain), daemon=True).start()
@@ -800,50 +803,52 @@ class NovelDownloaderApp:
                     req_headers = api_headers.copy()
                     req_headers["Referer"] = chapter_url
 
-                    # 2. Scope the ad_ack explicitly per episode
-                    chal_res = session.post(f"https://{domain}/api/ad/challenge", json={"path": chap_path}, headers=req_headers, timeout=10)
-                    chal_data = chal_res.json() if chal_res.status_code == 200 else {}
+                    # 2. Extract Ad Challenge directly from HTML to bypass tracking impressions
+                    chal_token = next((t for t in tokens if t.startswith("eyJ2Ijoy")), None)
+                    slot_nonces = []
+                    slot_match = re.search(r'(?:\\"|")slotNonces(?:\\"|")\s*:\s*\[(.*?)\]', chap_res.text)
+                    if slot_match:
+                        slot_nonces = re.findall(r'(?:\\"|")([^"\\]+)(?:\\"|")', slot_match.group(1))
 
-                    if chal_data and "challenge" in chal_data:
-                        challenge = chal_data["challenge"]
-                        chal_token = challenge.get("token")
-                        canary_url = challenge.get("canaryUrl")
-                        slot_nonces = challenge.get("slotNonces", [])
+                    chal_data = None
+                    if chal_token and slot_nonces:
+                        chal_data = {"token": chal_token, "slotNonces": slot_nonces}
+                    else:
+                        # Fallback to API if the HTML structure changes
+                        chal_res = session.post(f"https://{domain}/api/ad/challenge", json={"path": chap_path}, headers=req_headers, timeout=10)
+                        if chal_res.status_code == 200:
+                            chal_data = chal_res.json().get("challenge", {})
 
-                        canary_headers = doc_headers.copy()
-                        canary_headers["sec-fetch-dest"] = "image"
-                        canary_headers["sec-fetch-mode"] = "no-cors"
-                        canary_headers["Accept"] = "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"
-                        canary_headers["Referer"] = chapter_url
-
-                        # 3. Hit the invisible tracking pixels (slot nonces)
-                        for nonce in slot_nonces:
-                            imp_url = f"https://{domain}/api/ad/impression?t={chal_token}&s={nonce}"
-                            session.get(imp_url, headers=canary_headers, timeout=10)
-
-                        # 4. Hit the primary canary URL
-                        if canary_url:
-                            session.get(f"https://{domain}{canary_url}", headers=canary_headers, timeout=10)
-
-                        # 5. Acknowledge the ad challenge
+                    if chal_data and "token" in chal_data:
+                        # 3. Acknowledge the ad challenge immediately
                         ack_res = session.post(
                             f"https://{domain}/api/ad/ack",
                             json={
-                                "challengeToken": chal_token,
+                                "challengeToken": chal_data.get("token"),
                                 "total": 24,
                                 "visible": 24,
-                                "path": chap_path
+                                "path": chap_path,
+                                "slotNonces": chal_data.get("slotNonces", [])
                             },
                             headers=req_headers,
                             timeout=10
                         )
-
                         if ack_res.status_code == 200:
                             ack_json = ack_res.json()
                             if not ack_json.get("ok"):
+                                err_msg = ack_json.get("error")
+                                if err_msg == "blocked":
+                                    self.cancel_requested = True
+                                    self.log(f"[-] Block detected on Ad Ack. Halting queue.")
+                                    with progress_lock:
+                                        if not self.block_notified:
+                                            self.block_notified = True
+                                            self.root.after(0, lambda: messagebox.showerror(
+                                                "Access Blocked",
+                                                "Access blocked by the server.\n\nThis is usually a cookie/localstorage anomaly, not an IP block.\n\nPlease clear your browser cookies and localstorage for the site, or open it in a fresh Incognito window, and grab a new cURL command."
+                                            ))
+                                    break
                                 self.log(f"[-] Ad Ack failed: {ack_res.text}")
-                            elif ack_json.get("impression", {}).get("ok") is False:
-                                self.log(f"[-] Warning: Server rejected impression tracking: {ack_json}")
                         else:
                             self.log(f"[-] Ad Ack HTTP {ack_res.status_code}: {ack_res.text}")
 
@@ -901,7 +906,14 @@ class NovelDownloaderApp:
 
                         elif err_msg == "blocked":
                             self.cancel_requested = True
-                            self.log(f"[-] True block detected on {domain}. Halting queue.")
+                            self.log(f"[-] Block detected on Novel Content. Halting queue.")
+                            with progress_lock:
+                                if not self.block_notified:
+                                    self.block_notified = True
+                                    self.root.after(0, lambda: messagebox.showerror(
+                                        "Access Blocked",
+                                        "Access blocked by the server.\n\nThis is usually a cookie/localstorage anomaly, not an IP block.\n\nPlease clear your browser cookies and localstorage for the site, or open it in a fresh Incognito window, and grab a new cURL command."
+                                    ))
                             break
 
                         else:
