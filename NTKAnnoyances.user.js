@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NTK Annoyance Remover
 // @namespace    ntk
-// @version      1.0
+// @version      1.1
 // @description  Disables warning banner, devtools blocker, adblock detection, and mimics Ad-Acks.
 // @author       tyuop077
 // @match        *://sbxh3.com/*
@@ -26,19 +26,23 @@
         window.__ntkDevtoolsTripped = false;
         window.stop = function() {};
 
+        const targetCookies = ['ntk_blk', 'ntk_blk_ok', 'ntk_unlock'];
+        const targetKeys = ['ntk_blk', 'ntk_dev_warn'];
+
         // 2. DATA CLEANUP
         try {
             for (let i = 0; i < localStorage.length; i++) {
                 const key = localStorage.key(i);
-                if (key && (key.startsWith('ntk_blk') || key === 'ntk_dev_warn')) {
+                if (key && targetKeys.some(k => key.startsWith(k))) {
                     localStorage.removeItem(key);
                     i--;
                 }
             }
         } catch(e) {}
 
-        document.cookie = "ntk_blk=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;";
-        document.cookie = "ntk_blk_ok=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;";
+        targetCookies.forEach(cookie => {
+            document.cookie = `${cookie}=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;`;
+        });
 
         try {
             const req = indexedDB.open('ntk', 1);
