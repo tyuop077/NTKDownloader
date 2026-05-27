@@ -551,7 +551,7 @@ class NovelDownloaderApp:
 
         # By explicitly filtering out the volatile cookies from initialization,
         # we bypass libcurl's domain-vs-host cookie shadowing problem completely.
-        volatile_keys = {"nv", "ad_ack", "ntk_blk_ok_sig", "__ntk_ev_id"}
+        volatile_keys = {"nv", "ad_ack", "ntk_blk_ok_sig", "__ntk_ev_id", "ntk_blk", "ntk_dev_warn"}
         clean_cookies = {k: v for k, v in parsed_cookies.items() if k.lower() not in volatile_keys}
 
         def create_clean_session():
@@ -764,6 +764,11 @@ class NovelDownloaderApp:
                 if attempt > 0:
                     time.sleep(1)
 
+                # Scrub malicious cookies injected by the server to prevent thread poisoning
+                for bad_cookie in ["ntk_blk", "ntk_dev_warn"]:
+                    if bad_cookie in session.cookies.keys():
+                        del session.cookies[bad_cookie]
+
                 try:
                     # 1. Fetch HTML
                     chap_get_headers = doc_headers.copy()
@@ -816,7 +821,8 @@ class NovelDownloaderApp:
                         self.log(f"[-] Server error on HTML fetch for {ep_title} (HTTP {chap_res.status_code}).")
                         continue
 
-                    tokens = re.findall(r'(?:\\"|")token(?:\\"|")\s*:\s*(?:\\"|")([A-Za-z0-9_=-]+(?:\.[A-Za-z0-9_=-]+)+)(?:\\"|")', chap_res.text)
+                    # Relaxed regex to handle updated JWT formats
+                    tokens = re.findall(r'(?:\\"|")token(?:\\"|")\s*:\s*(?:\\"|")([A-Za-z0-9_=.-]+)(?:\\"|")', chap_res.text)
                     token = next((t for t in tokens if t.startswith("eyJuIjoi") or t.startswith("eyJlIjoi")), None)
 
                     if not token:
@@ -843,15 +849,23 @@ class NovelDownloaderApp:
                             chal_data = chal_res.json().get("challenge", {})
 
                     if chal_data and "token" in chal_data:
+                        # Dynamically calculate exact ad slots expected by the server
+                        # total 24 / visible 24 / slotNonces[4]
+                        total_ads = sum(int(match.group(1)) for match in re.finditer(r'data-br-n=(?:\\"|")?(\d+)(?:\\"|")?', chap_res.text))
+                        chal_nonces = chal_data.get("slotNonces", [])
+                        if total_ads == 0 and chal_nonces:
+                            total_ads = len(chal_nonces)
+                        visible_nonces = chal_nonces[:total_ads] if total_ads > 0 else chal_nonces
+
                         # 3. Acknowledge the ad challenge immediately
                         ack_res = session.post(
                             f"https://{domain}/api/ad/ack",
                             json={
                                 "challengeToken": chal_data.get("token"),
-                                "total": 24,
-                                "visible": 24,
+                                "total": total_ads,
+                                "visible": total_ads,
                                 "path": chap_path,
-                                "slotNonces": chal_data.get("slotNonces", [])
+                                "slotNonces": visible_nonces
                             },
                             headers=req_headers,
                             timeout=10
