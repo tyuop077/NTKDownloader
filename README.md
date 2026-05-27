@@ -31,5 +31,10 @@ This application bypasses site protections to securely fetch raw chapters and co
 
 *Note: Completed EPUBs and intermediate JSON caches are saved to your system's `Downloads/ntk01epubs` directory.*
 
+## NTK Annoyances Script (for browsing)
+
+1. Install [TamperMonkey](https://www.tampermonkey.net/).
+2. [Click here](https://github.com/tyuop077/NTKDownloader/raw/refs/heads/main/NTKAnnoyances.user.js) to install script.
+
 ## Disclaimer
 This tool is provided strictly for educational purposes and security research. The user assumes full responsibility for any actions taken using this software.
