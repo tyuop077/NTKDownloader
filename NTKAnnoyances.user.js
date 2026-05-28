@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         NTK Annoyance Remover
 // @namespace    ntk
-// @version      1.1
-// @description  Disables warning banner, devtools blocker, adblock detection, and mimics Ad-Acks.
+// @version      1.2
+// @description  Disables warning banners, devtools blocker and adblock detection.
 // @author       tyuop077
 // @match        *://sbxh3.com/*
 // @homepageURL  https://github.com/tyuop077/NTKDownloader
@@ -21,15 +21,41 @@
     };
 
     const payload = function() {
-        // 1. INLINE SCRIPT KILL-SWITCHES
+        // 1. Initial states and overrides
         window.__ntkDevtoolsPreflight = 1;
         window.__ntkDevtoolsTripped = false;
         window.stop = function() {};
 
+        // Prevent DevToolsBlocker from forcing a Google redirect if triggered
+        const origReplace = window.location.replace;
+        window.location.replace = function(url) {
+            const target = typeof url === 'string' ? url : (url && url.toString ? url.toString() : '');
+            if (target.includes('google.com')) return;
+            return origReplace.apply(this, arguments);
+        };
+
+        // 2. Cosmetic filter
+        const style = document.createElement('style');
+        style.textContent = `
+            div[id="ntk_blk_overlay"],
+            div[id="ntk_ad_allow_overlay"],
+            div[id="ntk_dev_warn_modal"],
+            .ntk-fade-in {
+                display: none !important;
+                opacity: 0 !important;
+                pointer-events: none !important;
+                z-index: -1 !important;
+            }
+            body, html {
+                overflow: auto !important;
+            }
+        `;
+        (document.head || document.documentElement).appendChild(style);
+
+        // 3. Data cleanup and interception
         const targetCookies = ['ntk_blk', 'ntk_blk_ok', 'ntk_unlock'];
         const targetKeys = ['ntk_blk', 'ntk_dev_warn'];
 
-        // 2. DATA CLEANUP
         try {
             for (let i = 0; i < localStorage.length; i++) {
                 const key = localStorage.key(i);
@@ -56,7 +82,7 @@
 
         const origSetItem = Storage.prototype.setItem;
         Storage.prototype.setItem = function(key, val) {
-            if (key.startsWith('ntk_blk') || key === 'ntk_dev_warn') return;
+            if (targetKeys.some(k => key.startsWith(k))) return;
             origSetItem.call(this, key, val);
         };
 
@@ -65,74 +91,28 @@
             Object.defineProperty(document, 'cookie', {
                 get: () => origCookie.get.call(document),
                 set: (val) => {
-                    if (val.includes('ntk_blk')) return;
+                    if (targetKeys.some(k => val.includes(k))) return;
                     origCookie.set.call(document, val);
                 }
             });
         }
 
-        // 3. DYNAMIC AD AUTO-ACKER
+        // 4. API request mocking
         const origFetch = window.fetch;
-        async function autoAckAd() {
-            const path = window.location.pathname;
-            try {
-                const chalRes = await origFetch("/api/ad/challenge", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ path: path }),
-                    credentials: "include"
-                });
-                if (!chalRes.ok) return;
-                const chalData = await chalRes.json();
-                if (!chalData?.challenge?.token) return;
-
-                // DYNAMIC CALCULATION: Mimic the exact logic of the original g() function
-                let expectedTotal = 0;
-                document.querySelectorAll('[data-br="1"][data-br-n]').forEach(el => {
-                    let n = parseInt(el.getAttribute("data-br-n") || "0", 10);
-                    if (Number.isFinite(n) && n > 0) expectedTotal += n;
-                });
-
-                const slotNonces = chalData.challenge.slotNonces || [];
-                if (expectedTotal === 0) expectedTotal = slotNonces.length || 2;
-
-                // Server expects slotNonces array length to match 'visible' count
-                const visibleNonces = slotNonces.slice(0, expectedTotal);
-
-                const ackRes = await origFetch("/api/ad/ack", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                        challengeToken: chalData.challenge.token,
-                        total: expectedTotal,
-                        visible: expectedTotal,
-                        path: path,
-                        slotNonces: visibleNonces
-                    }),
-                    credentials: "include"
-                });
-
-                if (ackRes.ok) {
-                    window.__ntk_ad_ack_scope = path;
-                    window.dispatchEvent(new CustomEvent("ntk-ad-ack-ready", { detail: { scope: path } }));
-                }
-            } catch (e) {}
-        }
-
-        autoAckAd();
-        const origPushState = history.pushState;
-        history.pushState = function() { origPushState.apply(this, arguments); autoAckAd(); };
-        window.addEventListener('popstate', autoAckAd);
-        window.addEventListener('ntk-ad-allow-needed', autoAckAd);
-
-        // 4. API REQUEST & BEACON MOCKING
         window.fetch = async function(...args) {
             const url = typeof args[0] === 'string' ? args[0] : (args[0] && args[0].url ? args[0].url : '');
-            if (url.includes('/api/me/block-check') || url.includes('/api/dev-block')) {
+
+            if (url.includes('/api/me/block-check')) {
                 return new Response(JSON.stringify({ blocked: false, ok: true }), {
                     status: 200, headers: { 'Content-Type': 'application/json' }
                 });
             }
+            if (url.includes('/api/dev-block') || url.includes('/api/m/ev')) {
+                return new Response(JSON.stringify({ ok: true }), {
+                    status: 200, headers: { 'Content-Type': 'application/json' }
+                });
+            }
+
             return origFetch.apply(this, args);
         };
 
@@ -144,7 +124,7 @@
             };
         }
 
-        // 5. BLOCK EXTERNAL SCRIPT
+        // 5. Block external init script
         const MOCK_JS = 'data:application/javascript,console.log("[Bypass] block.js intercepted!");';
         const origSrcDesc = Object.getOwnPropertyDescriptor(HTMLScriptElement.prototype, 'src');
         if (origSrcDesc) {
@@ -162,11 +142,12 @@
             return origSetAttribute.call(this, name, value);
         };
 
-        // 6. WEBPACK CHUNK INTERCEPTOR
+        // 6. Webpack chunk interceptor
         const badExports = [
-            'BlockCheck', 'BuildIdGuard', 'DevToolsBlocker', 'AdAckBeacon',
+            'BlockCheck', 'BuildIdGuard', 'DevToolsBlocker', /* 'AdAckBeacon', */
             'InitBlockGuard', 'AdBlockGuard', 'AdminBrowserDisguise', 'DevToolsBlockerGate'
         ];
+
         let _webpackChunk = window.webpackChunk_N_E || [];
         function hookWebpackChunk(array) {
             if (array.__hooked) return;
@@ -204,5 +185,6 @@
             set: (val) => { hookWebpackChunk(val); _webpackChunk = val; }
         });
     };
+
     injectScript(payload);
 })();
