@@ -233,10 +233,10 @@ class NovelDownloaderApp:
         self.log(f"[*] Initialized. EPUBs will be saved to:\n    {BASE_DIR}")
         self.log("[*] Instructions:")
         self.log("    1. Paste novel URLs in the first box.")
-        self.log("    2. Click 'Open [domain]/-' to open the browser page (404 error is intentional).")
+        self.log("    2. Click 'Open [domain]/favicon.ico' to open the browser page (404 error is intentional).")
         self.log("    3. Open DevTools (Three Dots Menu -> More Tools -> Developer Tools, or F12).")
         self.log("    4. Go to the Network tab and Refresh the page.")
-        self.log("    5. Right-click the '-' request -> Copy -> Copy as cURL (bash or POSIX, not Windows).")
+        self.log("    5. Right-click the 'favicon.ico' request -> Copy -> Copy as cURL (bash or POSIX, not Windows).")
         self.log("    6. Paste the entire command into the cURL box and start.\n")
         self.log("    * Note: If DevTools opening is blocked, open a new blank tab, press F12, and navigate to the site manually.\n")
 
@@ -293,7 +293,7 @@ class NovelDownloaderApp:
         btn_frame = ttk.Frame(options_frame)
         btn_frame.pack(side=tk.RIGHT)
 
-        self.open_btn = ttk.Button(btn_frame, text="Open None/-", command=self.open_helper, state=tk.DISABLED)
+        self.open_btn = ttk.Button(btn_frame, text="Open None/favicon.ico", command=self.open_helper, state=tk.DISABLED)
         self.open_btn.pack(side=tk.LEFT, padx=5)
 
         self.clear_btn = ttk.Button(btn_frame, text="Clear Console", command=self.clear_console)
@@ -352,11 +352,11 @@ class NovelDownloaderApp:
             host = urlparse(url_to_parse).netloc
             if host and '.' in host:
                 self.current_domain = host
-                self.open_btn.config(state=tk.NORMAL, text=f"Open {host}/-")
+                self.open_btn.config(state=tk.NORMAL, text=f"Open {host}/favicon.ico")
                 return
 
         self.current_domain = "ntk01.com"
-        self.open_btn.config(state=tk.DISABLED, text="Open ntk01.com/-")
+        self.open_btn.config(state=tk.DISABLED, text="Open ntk01.com/favicon.ico")
 
     def clear_console(self):
         self.console.config(state='normal')
@@ -365,7 +365,7 @@ class NovelDownloaderApp:
 
     def open_helper(self):
         if self.current_domain:
-            webbrowser.open(f"https://{self.current_domain}/-")
+            webbrowser.open(f"https://{self.current_domain}/favicon.ico")
 
     def save_session(self, curl_cmd, raw_urls):
         try:
@@ -445,7 +445,7 @@ class NovelDownloaderApp:
             return
 
         self.update_domain_btn()
-        domain = self.current_domain or "sbxh2.com"
+        domain = self.current_domain or "ntk01.com"
 
         headers, cookies = parse_curl_command(curl_cmd)
         if not headers or not cookies:
