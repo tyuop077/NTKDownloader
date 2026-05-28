@@ -22,7 +22,7 @@ import sys
 from Crypto.Cipher import AES
 import subprocess
 
-APP_VERSION = "1.4.1"
+APP_VERSION = "1.4.2"
 
 try:
     from build_env import GITHUB_REPO
@@ -551,7 +551,7 @@ class NovelDownloaderApp:
 
         # By explicitly filtering out the volatile cookies from initialization,
         # we bypass libcurl's domain-vs-host cookie shadowing problem completely.
-        volatile_keys = {"nv", "ad_ack", "ntk_blk_ok_sig", "__ntk_ev_id", "ntk_blk", "ntk_dev_warn"}
+        volatile_keys = {"nv", "ad_ack", "ad_ack_c", "ntk_blk_ok_sig", "__ntk_ev_id", "ntk_blk", "ntk_dev_warn"}
         clean_cookies = {k: v for k, v in parsed_cookies.items() if k.lower() not in volatile_keys}
 
         def create_clean_session():
@@ -849,6 +849,20 @@ class NovelDownloaderApp:
                             chal_data = chal_res.json().get("challenge", {})
 
                     if chal_data and "token" in chal_data:
+                        chal_token_extracted = chal_data.get("token")
+
+                        # --- Canary Endpoint found in DevTools logs ---
+                        canary_res = session.post(
+                            f"https://{domain}/api/ad/canary",
+                            json={
+                                "adAckCanary": True,
+                                "challengeToken": chal_token_extracted,
+                                "path": chap_path
+                            },
+                            headers=req_headers,
+                            timeout=10
+                        )
+
                         # Dynamically calculate exact ad slots expected by the server
                         # total 24 / visible 24 / slotNonces[4]
                         total_ads = sum(int(match.group(1)) for match in re.finditer(r'data-br-n=(?:\\"|")?(\d+)(?:\\"|")?', chap_res.text))
@@ -861,7 +875,7 @@ class NovelDownloaderApp:
                         ack_res = session.post(
                             f"https://{domain}/api/ad/ack",
                             json={
-                                "challengeToken": chal_data.get("token"),
+                                "challengeToken": chal_token_extracted,
                                 "total": total_ads,
                                 "visible": total_ads,
                                 "path": chap_path,
