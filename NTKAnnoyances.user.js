@@ -35,7 +35,7 @@
         };
 
         // 2. Cosmetic filter
-        const style = document.createElement('style');
+        /*const style = document.createElement('style');
         style.textContent = `
             div[id="ntk_blk_overlay"],
             div[id="ntk_ad_allow_overlay"],
@@ -49,8 +49,13 @@
             body, html {
                 overflow: auto !important;
             }
+            /!* Force allow text selection *!/
+            * {
+                user-select: text !important;
+                -webkit-user-select: text !important;
+            }
         `;
-        (document.head || document.documentElement).appendChild(style);
+        (document.head || document.documentElement).appendChild(style);*/
 
         // 3. Data cleanup and interception
         const targetCookies = ['ntk_blk', 'ntk_blk_ok', 'ntk_unlock'];
@@ -84,6 +89,13 @@
         Storage.prototype.setItem = function(key, val) {
             if (targetKeys.some(k => key.startsWith(k))) return;
             origSetItem.call(this, key, val);
+        };
+
+        const origGetItem = Storage.prototype.getItem;
+        Storage.prototype.getItem = function(key) {
+            // Disable swipe gesture so click+hold text selection works normally
+            if (key === 'viewer-swipe-on') return '0';
+            return origGetItem.call(this, key);
         };
 
         const origCookie = Object.getOwnPropertyDescriptor(Document.prototype, 'cookie');
@@ -142,7 +154,24 @@
             return origSetAttribute.call(this, name, value);
         };
 
-        // 6. Webpack chunk interceptor
+        // 6. Shadow DOM bypass for Google Translate
+        const origAttachShadow = Element.prototype.attachShadow;
+        Element.prototype.attachShadow = function(init) {
+            // Convert the novel container's shadow root to a regular div so built-in Google Translate can read it
+            if (this.style && this.style.getPropertyValue('--novel-font-size')) {
+                const fakeRoot = document.createElement('div');
+                fakeRoot.className = 'ntk-light-dom';
+                this.appendChild(fakeRoot);
+                return fakeRoot;
+            }
+            // Force other shadow roots open for general accessibility
+            if (init && init.mode === 'closed') {
+                init.mode = 'open';
+            }
+            return origAttachShadow.call(this, init);
+        };
+
+        // 7. Webpack chunk interceptor
         const badExports = [
             'BlockCheck', 'BuildIdGuard', 'DevToolsBlocker', /* 'AdAckBeacon', */
             'InitBlockGuard', 'AdBlockGuard', 'AdminBrowserDisguise', 'DevToolsBlockerGate'
